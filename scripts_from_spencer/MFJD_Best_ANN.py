@@ -30,8 +30,8 @@ import datetime as dt
 # data locations
 #file_data = r"U:\Internal Share\Water Program\Flow Science+Projects (not ISWRs)\WaterTemperature\WaterTemperatureBasedFlowTargets\MFJD\Data\USGS.txt"
 #met_data = r"U:\Internal Share\Water Program\Flow Science+Projects (not ISWRs)\WaterTemperature\WaterTemperatureBasedFlowTargets\MFJD\Data\2407445.csv"
-file_data = r"U:\Internal Share\Water Program\Flow Science+Projects (not ISWRs)\WaterTemperature\WaterTemperatureBasedFlowTargets\MFJD\Data\2022_Data\FlowandTemp.csv"
-met_data = r"U:\Internal Share\Water Program\Flow Science+Projects (not ISWRs)\WaterTemperature\WaterTemperatureBasedFlowTargets\MFJD\Data\2022_Data\Met.csv"
+file_data = r"scripts_from_spencer/2022_Data/FlowandTemp.csv"
+met_data = r"scripts_from_spencer/2022_Data/Met.csv"
 
 # output names and locations
 output_dir = r"U:\Internal Share\Water Program\Code\Python\WaterTemperature\MFJd\Output"
