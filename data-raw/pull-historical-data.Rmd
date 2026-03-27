@@ -1,0 +1,206 @@
+---
+title: "Compile Historical Instream Temperature"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+
+colors_small <-  c("#9A8822", "#F5CDB4", "#F8AFA8", "#FDDDA0", "#74A089", #Royal 2
+                   "#899DA4", "#C93312", "#DC863B" # royal 1 (- 3)
+)
+```
+
+### River Mile 6 Instream Temperature
+
+Currently 2012-04-23 - 2025-10-17
+
+```{r include=FALSE}
+monitoring_location_id <- readxl::read_xlsx(here::here("data-raw","2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Monitoring_Locations")
+# 2025
+
+# TODO: for 2024 and 2025 - there are three sheets with 006-00 (WC_006-00_21629136, WC_006-00_21555606, WC_006-00_21564982)
+# Should I pull all of them and average? 
+rm6_2025_raw <- readxl::read_xlsx(here::here("data-raw","2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_006-00_21629136", skip = 3) |> 
+  select(date = DATE, temperature = TEMP_r) |> 
+  mutate(date = as_datetime(date)) 
+
+# 2024
+rm6_2024_raw <- readxl::read_xlsx(here::here("data-raw","2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 21629136", skip = 3) |> 
+  select(date = DATE, temperature = TEMP_r) |> 
+  mutate(date = as_datetime(date)) 
+
+rm6_2023_raw <- readxl::read_xlsx(here::here("data-raw","2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Results") |> 
+  mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |> 
+  left_join(monitoring_location_id |> 
+              select(`Monitoring Location ID`, `Monitoring Location Name`)) |> 
+  filter(`Monitoring Location Name` == "WC_006-00")   # filter for the RM6 site
+
+rm6_2022_raw <- readxl::read_xlsx(here::here("data-raw","2022_UDWC_WQM-ContTemp _FINAL.xlsx"), sheet = "Results") |> 
+  mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |> 
+  left_join(monitoring_location_id |> 
+              select(`Monitoring Location ID`, `Monitoring Location Name`)) |> 
+  filter(`Monitoring Location Name` == "WC_006-00") # filter for the RM6 site
+
+rm6_2025_2022 <- bind_rows(rm6_2023_raw,
+                           rm6_2022_raw) |> 
+  janitor::clean_names() |> 
+  rename(date = activity_start_date,
+         temperature = result_value) |> 
+  select(date, temperature) |> 
+  bind_rows(rm6_2024_raw, rm6_2025_raw)
+
+# rm6_2021_raw_1 <- readxl::read_xlsx(here::here("data-raw","UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423312", range = "A5:C1830")
+rm6_2021_raw_2 <- readxl::read_xlsx(here::here("data-raw","UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423310", range = "A5:C1040") |> 
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+
+rm6_2020_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2020_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423294", range = "A5:C5092") |> 
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+  
+rm6_2019_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_006.00_10792864", range = "A5:C4694") |> 
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+
+rm6_2018_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_006-00_354425", range = "A5:C5264") |> 
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+
+rm6_2017_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_006-00_353753", range = "A5:C3511") |> 
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+rm6_2016_raw <- readxl::read_xlsx(here::here("data-raw","UDWC-Cont-Temp-2016","WC_006-00.xlsx"), sheet = "354424 Data") |> 
+  rename(Temp = `Temp (°C)`)
+
+rm6_2015_raw <- readxl::read_xlsx(here::here("data-raw","2015-UDWC-Cont-Temp-Data","WC_006-00.xlsx"), sheet = "354426 Data") |> 
+  rename(Temp = `Temp (°C)`)
+
+rm6_2014_raw <- readxl::read_xlsx(here::here("data-raw","2014","WC_006-00.xlsx"), sheet = "3544424 Data") |> 
+  rename(Date = `Date(yyyy-mm-dd)`,
+         Time = `Time(hh:mm:ss)`,
+         Temp = `Temperature (°C)`)
+
+rm6_2013_raw <- readxl::read_xlsx(here::here("data-raw","2013","WC_006-00.xlsx"), sheet = "353754 Data") |> 
+  rename(Temp = `°C`)
+
+rm6_2012_raw <- readxl::read_xlsx(here::here("data-raw","2012","WC_006-00.xlsx"), sheet = "4673") |> 
+  mutate(Temp = as.numeric(Temp))
+
+rm6_2012_2021 <- bind_rows(rm6_2012_raw,
+                           rm6_2013_raw,
+                           rm6_2014_raw,
+                           rm6_2015_raw,
+                           rm6_2016_raw,
+                           rm6_2017_raw,
+                           rm6_2018_raw,
+                           rm6_2019_raw,
+                           rm6_2020_raw,
+                           rm6_2021_raw_2) |> 
+  rename(date = Date,
+         temperature = Temp) |> 
+  select(date, temperature)
+
+rm6_full_2012_2025 <- bind_rows(rm6_2025_2022,
+                                rm6_2012_2021) |> 
+  group_by(date) |> 
+  summarize(mean = mean(temperature, na.rm = T),
+            median = median(temperature, na.rm = T),
+            max = max(temperature, na.rm = T),
+            min = min(temperature, na.rm = T)) |> 
+  pivot_longer(cols = mean:min, values_to = "temperature", names_to = "statistic")
+
+rm_6_historical <- rm6_full_2012_2025
+
+usethis::use_data(rm_6_historical, overwrite = T)
+
+```
+
+```{r}
+rm_6_historical |> 
+  group_by(year = year(date)) |> 
+  summarise(mean_temperature = mean(temperature, na.rm = T),
+            min_temperature = min(temperature, na.rm = T),
+            max_temperature = max(temperature, na.rm = T)) |> 
+  knitr::kable(digits = 2)
+
+ggplot() + 
+  geom_line(data = rm_6_historical, aes(x = date, y = temperature, color = statistic)) +
+    scale_color_manual(values = colors_small) +
+  theme_minimal()
+
+```
+
+### Camp Polk Instream Temperature
+
+Currently pulled from OWRD 2015-10-01 - 2024-09-26
+
+```{r include=FALSE}
+cp_2015_2019_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2015_2019.xls"))
+cp_2023_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2023.xls"))
+cp_2022_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2022.xls"))
+cp_2021_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2021.xls"))
+cp_2020_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2020.xls"))
+cp_2019_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2019.xls"))
+
+camp_polk_historical <- bind_rows(cp_2015_2019_raw,
+                       cp_2023_raw,
+                       cp_2022_raw,
+                       cp_2021_raw,
+                       cp_2020_raw,
+                       cp_2019_raw) |> 
+  rename(date = record_date,
+         temperature = `instantaneous_water_temp_C¬∞`) |> 
+  select(date, temperature) |> 
+  mutate(date = as.Date(date)) |> 
+  group_by(date) |> 
+  summarize(mean = mean(temperature, na.rm = T),
+            median = median(temperature, na.rm = T),
+            max = max(temperature, na.rm = T),
+            min = min(temperature, na.rm = T)) |> 
+  pivot_longer(cols = mean:min, values_to = "temperature", names_to = "statistic")
+
+usethis::use_data(camp_polk_historical, overwrite = T)
+
+```
+
+```{r}
+camp_polk_historical |> 
+  group_by(year = year(date)) |> 
+  summarise(mean_temperature = mean(temperature, na.rm = T),
+            min_temperature = min(temperature, na.rm = T),
+            max_temperature = max(temperature, na.rm = T)) |> 
+  knitr::kable(digits = 2)
+
+ggplot() + 
+  geom_line(data = camp_polk_historical, aes(x = date, y = temperature, color = statistic)) +
+    scale_color_manual(values = colors_small) +
+  theme_minimal()
+
+```
+
+### Camp Polk Discharge 
+
+```{r}
+
+```
+
+### River Mile 8.5 Instream Temperature 
+
+```{r}
+
+```

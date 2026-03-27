@@ -1,0 +1,14 @@
+Package: whychusInputs
+Title: Input Data and Parameters for the Whychus Basin Model
+Version: 0.1.0
+Authors@R: 
+    person("Maddee", "Wiggins", , "mrubenson@flowwest.com", role = c("aut", "cre"))
+Description: Provides input datasets, parameters, and helper functions
+    for the Whychus Creek temperature forecasting
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Depends: 
+    R (>= 3.5)
