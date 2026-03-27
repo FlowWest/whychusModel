@@ -20,27 +20,27 @@ colors_small <-  c("#9A8822", "#F5CDB4", "#F8AFA8", "#FDDDA0", "#74A089", #Royal
 Currently 2012-04-23 - 2025-10-17
 
 ```{r include=FALSE}
-monitoring_location_id <- readxl::read_xlsx(here::here("data-raw","2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Monitoring_Locations")
+monitoring_location_id <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Monitoring_Locations")
 # 2025
 
 # TODO: for 2024 and 2025 - there are three sheets with 006-00 (WC_006-00_21629136, WC_006-00_21555606, WC_006-00_21564982)
 # Should I pull all of them and average? 
-rm6_2025_raw <- readxl::read_xlsx(here::here("data-raw","2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_006-00_21629136", skip = 3) |> 
+rm6_2025_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature",  "2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_006-00_21629136", skip = 3) |> 
   select(date = DATE, temperature = TEMP_r) |> 
   mutate(date = as_datetime(date)) 
 
 # 2024
-rm6_2024_raw <- readxl::read_xlsx(here::here("data-raw","2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 21629136", skip = 3) |> 
+rm6_2024_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 21629136", skip = 3) |> 
   select(date = DATE, temperature = TEMP_r) |> 
   mutate(date = as_datetime(date)) 
 
-rm6_2023_raw <- readxl::read_xlsx(here::here("data-raw","2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Results") |> 
+rm6_2023_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Results") |> 
   mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |> 
   left_join(monitoring_location_id |> 
               select(`Monitoring Location ID`, `Monitoring Location Name`)) |> 
   filter(`Monitoring Location Name` == "WC_006-00")   # filter for the RM6 site
 
-rm6_2022_raw <- readxl::read_xlsx(here::here("data-raw","2022_UDWC_WQM-ContTemp _FINAL.xlsx"), sheet = "Results") |> 
+rm6_2022_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2022_UDWC_WQM-ContTemp _FINAL.xlsx"), sheet = "Results") |> 
   mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |> 
   left_join(monitoring_location_id |> 
               select(`Monitoring Location ID`, `Monitoring Location Name`)) |> 
@@ -55,50 +55,50 @@ rm6_2025_2022 <- bind_rows(rm6_2023_raw,
   bind_rows(rm6_2024_raw, rm6_2025_raw)
 
 # rm6_2021_raw_1 <- readxl::read_xlsx(here::here("data-raw","UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423312", range = "A5:C1830")
-rm6_2021_raw_2 <- readxl::read_xlsx(here::here("data-raw","UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423310", range = "A5:C1040") |> 
+rm6_2021_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423310", range = "A5:C1040") |> 
   rename(Date = DATE,
          Time = TIME,
          Temp = TEMP_r)
 
 
-rm6_2020_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2020_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423294", range = "A5:C5092") |> 
+rm6_2020_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2020_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423294", range = "A5:C5092") |> 
   rename(Date = DATE,
          Time = TIME,
          Temp = TEMP_r)
 
   
-rm6_2019_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_006.00_10792864", range = "A5:C4694") |> 
+rm6_2019_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_006.00_10792864", range = "A5:C4694") |> 
   rename(Date = DATE,
          Time = TIME,
          Temp = TEMP_r)
 
 
-rm6_2018_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_006-00_354425", range = "A5:C5264") |> 
+rm6_2018_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_006-00_354425", range = "A5:C5264") |> 
   rename(Date = DATE,
          Time = TIME,
          Temp = TEMP_r)
 
 
-rm6_2017_raw <- readxl::read_xlsx(here::here("data-raw","UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_006-00_353753", range = "A5:C3511") |> 
+rm6_2017_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_006-00_353753", range = "A5:C3511") |> 
   rename(Date = DATE,
          Time = TIME,
          Temp = TEMP_r)
 
-rm6_2016_raw <- readxl::read_xlsx(here::here("data-raw","UDWC-Cont-Temp-2016","WC_006-00.xlsx"), sheet = "354424 Data") |> 
+rm6_2016_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC-Cont-Temp-2016","WC_006-00.xlsx"), sheet = "354424 Data") |> 
   rename(Temp = `Temp (°C)`)
 
-rm6_2015_raw <- readxl::read_xlsx(here::here("data-raw","2015-UDWC-Cont-Temp-Data","WC_006-00.xlsx"), sheet = "354426 Data") |> 
+rm6_2015_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2015-UDWC-Cont-Temp-Data","WC_006-00.xlsx"), sheet = "354426 Data") |> 
   rename(Temp = `Temp (°C)`)
 
-rm6_2014_raw <- readxl::read_xlsx(here::here("data-raw","2014","WC_006-00.xlsx"), sheet = "3544424 Data") |> 
+rm6_2014_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2014","WC_006-00.xlsx"), sheet = "3544424 Data") |> 
   rename(Date = `Date(yyyy-mm-dd)`,
          Time = `Time(hh:mm:ss)`,
          Temp = `Temperature (°C)`)
 
-rm6_2013_raw <- readxl::read_xlsx(here::here("data-raw","2013","WC_006-00.xlsx"), sheet = "353754 Data") |> 
+rm6_2013_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2013","WC_006-00.xlsx"), sheet = "353754 Data") |> 
   rename(Temp = `°C`)
 
-rm6_2012_raw <- readxl::read_xlsx(here::here("data-raw","2012","WC_006-00.xlsx"), sheet = "4673") |> 
+rm6_2012_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2012","WC_006-00.xlsx"), sheet = "4673") |> 
   mutate(Temp = as.numeric(Temp))
 
 rm6_2012_2021 <- bind_rows(rm6_2012_raw,
@@ -150,12 +150,12 @@ ggplot() +
 Currently pulled from OWRD 2015-10-01 - 2024-09-26
 
 ```{r include=FALSE}
-cp_2015_2019_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2015_2019.xls"))
-cp_2023_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2023.xls"))
-cp_2022_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2022.xls"))
-cp_2021_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2021.xls"))
-cp_2020_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2020.xls"))
-cp_2019_raw <- readxl::read_xls(here::here("data-raw","camp_polk_2019.xls"))
+cp_2015_2019_raw <- readxl::read_xls(here::here("data-raw","historical-temperature", "camp_polk_2015_2019.xls"))
+cp_2023_raw <- readxl::read_xls(here::here("data-raw","historical-temperature", "camp_polk_2023.xls"))
+cp_2022_raw <- readxl::read_xls(here::here("data-raw","historical-temperature", "camp_polk_2022.xls"))
+cp_2021_raw <- readxl::read_xls(here::here("data-raw","historical-temperature", "camp_polk_2021.xls"))
+cp_2020_raw <- readxl::read_xls(here::here("data-raw","historical-temperature", "camp_polk_2020.xls"))
+cp_2019_raw <- readxl::read_xls(here::here("data-raw","historical-temperature", "camp_polk_2019.xls"))
 
 camp_polk_historical <- bind_rows(cp_2015_2019_raw,
                        cp_2023_raw,
