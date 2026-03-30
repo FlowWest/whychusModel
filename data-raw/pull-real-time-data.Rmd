@@ -21,6 +21,7 @@ library(stringr)
 library(lubridate)
 library(httr2)
 library(jsonlite)
+library(whychusInputs)
 ```
 
 ## Camp Polk - in-stream temperature and discharge
@@ -28,126 +29,21 @@ library(jsonlite)
 OWRD station ID 14076100:
 <https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14076100>
 
-```{r include=FALSE}
-get_owrd_hydro <- function(
-    station_nbr = "14076100",
-    start_date,
-    end_date,
-    data_source = c(
-      "MDF",                # Mean Daily Flow
-      "Instantaneous_Flow", # Instantaneous Flow
-      "WTEMP15",            # Instantaneous Water Temperature
-      "WTEMP_MEAN",         # Mean Daily Water Temperature
-      "WTEMP_MAX",          # Maximum Daily Water Temperature
-      "WTEMP_MIN"           # Minimum Daily Water Temperature
-    ),
-    download_format = c("tsv", "html", "xls")
-) {
-
-  data_source <- match.arg(data_source)
-  download_format <- match.arg(download_format)
-
-  url <- paste0(
-    "https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=",
-    station_nbr
-  )
-
-  # preserve cookies/session
-  h <- handle(url)
-
-  # initial GET
-  resp_get <- GET(url, handle = h)
-  stop_for_status(resp_get)
-
-  page <- read_html(content(resp_get, as = "text", encoding = "UTF-8"))
-  frm <- html_form(page)[[1]]
-
-  get_field_value <- function(form, nm) {
-    x <- form$fields[[nm]]
-    if (is.null(x)) return(NULL)
-    x$value
-  }
-
-  body <- list(
-    "__VIEWSTATE" = get_field_value(frm, "__VIEWSTATE"),
-    "__VIEWSTATEGENERATOR" = get_field_value(frm, "__VIEWSTATEGENERATOR"),
-    "__EVENTVALIDATION" = get_field_value(frm, "__EVENTVALIDATION"),
-    "ctl00$PageData$tb_start_date" = format(as.Date(start_date), "%m/%d/%Y"),
-    "ctl00$PageData$tb_end_date" = format(as.Date(end_date), "%m/%d/%Y"),
-    "ctl00$PageData$ddl_data_source" = data_source,
-    "ctl00$PageData$ddl_axis_type" = "LINEAR",
-    "ctl00$PageData$ddl_download_format" = download_format,
-    "ctl00$PageData$btn_download" = "Download"
-  )
-
-  body <- body[!vapply(body, is.null, logical(1))]
-
-  # classic form POST
-  resp_post <- POST(
-    url,
-    handle = h,
-    body = body,
-    encode = "form",
-    add_headers(
-      Referer = url,
-      Origin = "https://apps.wrd.state.or.us"
-    )
-  )
-
-  stop_for_status(resp_post)
-
-  ctype <- headers(resp_post)[["content-type"]] %||% ""
-  raw <- content(resp_post, as = "raw")
-  txt <- content(resp_post, as = "text", encoding = "UTF-8")
-
-  # TSV is usually the easiest / most reliable
-  if (download_format == "tsv" || str_detect(ctype, "tab|plain|octet-stream")) {
-    return(
-      read_tsv(I(txt), show_col_types = FALSE) |>
-        clean_names()
-    )
-  }
-
-  if (download_format == "html" || str_detect(ctype, "html")) {
-    tabs <- read_html(txt) |> html_table(fill = TRUE)
-    if (length(tabs) == 0) {
-      cat(substr(txt, 1, 1000))
-      stop("No HTML table returned; try download_format = 'tsv'.")
-    }
-    return(tabs[[1]] |> clean_names())
-  }
-
-  if (download_format == "xls" || str_detect(ctype, "excel|spreadsheet|ms-excel")) {
-    tmp <- tempfile(fileext = ".xls")
-    writeBin(raw, tmp)
-    return(readxl::read_excel(tmp) |> clean_names())
-  }
-
-  cat(substr(txt, 1, 1000))
-  stop("Unrecognized response type.")
-}
-
-`%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
-
-```
-
 ```{r}
 # instantaneous flow
 flow_daily_raw <- get_owrd_hydro(
   station_nbr = "14076100",
   start_date = Sys.Date()-5,
   end_date = Sys.Date()-1,
-  data_source = "Instantaneous_Flow",
-  download_format = "tsv"
+  data_source = "Instantaneous_Flow"
 )
 
 # instantaneous water temperature
 temp_daily_raw <- get_owrd_hydro(
   station_nbr = "14076100",
-  start_date = Sys.Date()-5,
+  start_date = Sys.Date()-100,
   end_date = Sys.Date()-1,
-  data_source = "WTEMP15",
-  download_format = "tsv"
+  data_source = "WTEMP15"
 ) 
 
 temperature <- temp_daily_raw |> 
@@ -199,12 +95,12 @@ Data options:
 -   apparentTemperature: Apparent temperature (heat index or wind chill)
 
 -   heatIndex: Heat index. This is the apparentTemperature data with
-    values filtered out that are below the threshold of the heat index
-    calculation.
+values filtered out that are below the threshold of the heat index
+calculation.
 
 -   windChill: Wind chill. This is the apparentTemperature data with
-    values filtered out that are above the threshold of the wind chill
-    calculation.
+values filtered out that are above the threshold of the wind chill
+calculation.
 
 -   skyCover: Percentage of sky with cloud cover
 
@@ -218,51 +114,19 @@ RM 8.5 data logger location: 44.390278, -121.406792
 
 ```{r}
 # find the grid by running this: 
-link <- "https://api.weather.gov/points/44.390278,-121.406792"
-grid <- request(link) |>
-  req_perform() |>
-  resp_body_json()
-grid$properties$forecastGridData
+# link <- "https://api.weather.gov/points/44.390278,-121.406792"
+# grid <- request(link) |>
+#   req_perform() |>
+#   resp_body_json()
+# grid$properties$forecastGridData
 
 # to get forecast: 
-link_met <- "https://api.weather.gov/gridpoints/PDT/35,57"
+# link_met <- "https://api.weather.gov/gridpoints/PDT/35,57"
 
-weather_forecast <- request(link_met) |>
-  req_perform() |>
-  resp_body_json()
-
-air_temp <- weather_forecast$properties$temperature$values |>
-    map_dfr(~ tibble(
-    validTime = .x$validTime,
-    air_temperature_c = .x$value
-  )) |>
-  mutate(
-    datetime = ymd_hms(str_extract(validTime, "^[^/]+")),
-    duration = str_extract(validTime, "(?<=/)PT\\d+H")
-  ) |>
-  select(datetime, air_temperature_c, duration)
-
-max_air_temp <- weather_forecast$properties$maxTemperature$values |> 
-  map_dfr(~ tibble(
-    validTime = .x$validTime,
-    max_air_temp_c = .x$value
-  )) |>
-  mutate(
-    datetime = ymd_hms(str_extract(validTime, "^[^/]+")),
-    duration = str_extract(validTime, "(?<=/)PT\\d+H")
-  ) |>
-  select(datetime, max_air_temp_c, duration)
-
-min_air_temp <- weather_forecast$properties$minTemperature$values |> 
-  map_dfr(~ tibble(
-    validTime = .x$validTime,
-    min_air_temp_c = .x$value
-  )) |>
-  mutate(
-    datetime = ymd_hms(str_extract(validTime, "^[^/]+")),
-    duration = str_extract(validTime, "(?<=/)PT\\d+H")
-  ) |>
-  select(datetime, min_air_temp_c, duration)
+air_temp <- get_nws_forecast("PDT/35,57", "temperature")
+min_air_temp <- get_nws_forecast("PDT/35,57", "minTemperature")
+max_air_temp <- get_nws_forecast("PDT/35,57", "maxTemperature")
+sky_cover <- get_nws_forecast("PDT/35,57", "skyCover")
 
 ```
 
@@ -272,6 +136,13 @@ ggplot(air_temp, aes(x = datetime, y = air_temperature_c)) +
   geom_line() +
   geom_point(data = min_air_temp, aes(x = datetime, y = min_air_temp_c, color = "min")) + 
   geom_point(data = max_air_temp, aes(x = datetime, y = max_air_temp_c, color = "max")) + 
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(sky_cover, aes(x = datetime, y = sky_cover_perc)) + 
+  geom_line() +
   theme_minimal()
 
 ```
