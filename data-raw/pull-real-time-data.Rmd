@@ -76,7 +76,7 @@ ggplot(data = flow,
 
 ```
 
-## Air Temperature
+## NWS Forecasts
 
 <https://weather-gov.github.io/api/gridpoints#>:\~:text=What's%20a%20gridpoint%3F,of%20these%202.5km%20squares
 
@@ -146,42 +146,23 @@ ggplot(sky_cover, aes(x = datetime, y = sky_cover_perc)) +
   theme_minimal()
 
 ```
+
+## OpenMeteo weather forecasts and historical weather 
+
+TODO: compare to NWS
+
 ## Past Weather Forecasts
 
+What gfs_seamless actually is:
+GFS (Global Forecast System) is the same underlying model that NWS uses operationally, so the forecast values will be very similar. However there are a few caveats:
+
+Spatial downscaling — Open-Meteo applies statistical downscaling to the raw GFS output. The raw GFS grid is ~25km resolution; Open-Meteo interpolates to your exact point and may apply terrain corrections. NWS does its own post-processing (MOS — Model Output Statistics) to produce the official forecast you'd see on weather.gov.
+NWS = GFS + post-processing — what NWS actually issues publicly is not raw GFS. It goes through MOS bias correction and human forecaster adjustments, particularly for temperature. So the official NWS forecast for your point could differ from raw GFS by 1–3°C on any given day.
+gfs_seamless blends models — it stitches together GFS with ECMWF for longer lead times, so at day 7 you may not be getting pure GFS at all.
+
+What this means practically:
+SourceWhat it isgfs_seamless via Open-MeteoRaw GFS, downscaled, possibly blendedOfficial NWS forecast (weather.gov)GFS + MOS + human adjustment
+
 ```{r}
-library(aws.s3)
 
-bucket <- "noaa-ndfd-pds"
-
-objects <- get_bucket(
-  bucket,
-  region = "us-east-1",
-  anonymous = TRUE
-)
-
-bucket_df <- aws.s3::get_bucket_df(
-  "noaa-ndfd-pds",
-  region = "us-east-1",
-  anonymous = TRUE
-)
-
-download_ndfd_file <- function(key, destfile) {
-  url <- paste0("https://noaa-ndfd-pds.s3.amazonaws.com/", key)
-  download.file(url, destfile, mode = "wb")
-  destfile
-}
-
-download_ndfd_file(
-  key = "NDFDelem_fullres_202206.xls",
-  destfile = "NDFDelem_fullres_202206.xls"
-)
-
-
-
-url <- "https://noaa-ndfd-pds.s3.us-east-1.amazonaws.com/ST.expr/DF.gr2/DC.ndfd/AR.conus/VP.004-007/ds.temp.bin"
-httr2::request(url) |>
-  httr2::req_method("HEAD") |>
-  httr2::req_perform()
-
-download.file(url, "ds.temp.bin", mode = "wb")
 ```
