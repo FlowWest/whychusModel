@@ -32,3 +32,20 @@
 #' @source Oregon Water Resources Department Near Real-Time Hydrograph:
 #'   \url{https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/}
 "camp_polk_historical"
+
+#' Historical RM 8.5 instream temperature
+#'
+#' Daily instream water temperature collected by the Upper Deschutes Watershed
+#' Council (UDWC) at the Rimrock Ranch downstream site (WC_008-50) on Whychus
+#' Creek, river mile 8.5.
+#'
+#' @format A data frame with columns:
+#' \describe{
+#'   \item{\code{date}}{POSIXct. Observation date, ranging from 2011 to present.}
+#'   \item{\code{statistic}}{Character. Summary statistic: \code{"mean"}, \code{"median"}, \code{"max"}, \code{"min"}.}
+#'   \item{\code{temperature}}{Numeric. Instream temperature in degrees Celsius.}
+#' }
+#'
+#' @source Upper Deschutes Watershed Council continuous temperature monitoring
+#'   program. Data compiled from annual UDWC data submission files (2011–2025).
+"rm_8_5_historical"

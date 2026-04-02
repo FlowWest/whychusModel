@@ -231,12 +231,139 @@ ggplot() +
 
 ```
 
+### River Mile 8.5 Instream Temperature
 
+Collected using a HOBO datalogger by Upper Deschutes Watershed Council 
 
-### River Mile 8.5 Instream Temperature 
+```{r include=FALSE}
+# 2025
+rm8_5_2025_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_008-50_21629137", skip = 3) |>
+  select(date = DATE, temperature = TEMP_r) |>
+  mutate(date = as_datetime(date))
+
+# 2024
+rm8_5_2024_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_008-50 21629137", skip = 3) |>
+  select(date = DATE, temperature = TEMP_r) |>
+  mutate(date = as_datetime(date))
+
+# 2023
+rm8_5_2023_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Results") |>
+  mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |>
+  left_join(monitoring_location_id |>
+              select(`Monitoring Location ID`, `Monitoring Location Name`)) |>
+  filter(`Monitoring Location Name` == "WC_008-50")
+
+# 2022
+rm8_5_2022_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2022_UDWC_WQM-ContTemp _FINAL.xlsx"), sheet = "Results") |>
+  mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |>
+  left_join(monitoring_location_id |>
+              select(`Monitoring Location ID`, `Monitoring Location Name`)) |>
+  filter(`Monitoring Location Name` == "WC_008-50")
+
+rm8_5_2022_2025 <- bind_rows(rm8_5_2023_raw,
+                              rm8_5_2022_raw) |>
+  janitor::clean_names() |>
+  rename(date = activity_start_date,
+         temperature = result_value) |>
+  select(date, temperature) |>
+  bind_rows(rm8_5_2024_raw, rm8_5_2025_raw)
+
+# 2021
+rm8_5_2021_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_008-50 20423294", range = "A5:C4899") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2020
+rm8_5_2020_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2020_ContinuousDataSubmission_trimmed_FINAL.xlsx"), sheet = "WC_008-50 10792844", range = "A5:C4905") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2019
+rm8_5_2019_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_008.50_10792839", range = "A5:C4856") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2018
+rm8_5_2018_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_008-50_10127694", range = "A5:C5260") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2017
+rm8_5_2017_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_008-50_10792864", range = "A5:C4179") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2016
+rm8_5_2016_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC-Cont-Temp-2016", "WC_008-50.xlsx"), sheet = "354423_Data") |>
+  rename(Temp = `Temp (°C)`)
+
+# 2015
+rm8_5_2015_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2015-UDWC-Cont-Temp-Data", "WC_008-50.xlsx"), sheet = "353753 Data") |>
+  rename(Temp = `Temp (°C)`)
+
+# 2014
+rm8_5_2014_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2014", "WC_008-50.xlsx"), sheet = "353754 Data") |>
+  rename(Temp = Temperature)
+
+# 2013 - labeled "WC ds Rimrock"
+rm8_5_2013_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2013", "WC ds Rimrock.xlsx"), sheet = "5769 Data") |>
+  rename(Temp = `°C`)
+
+# 2012 - labeled "WC_00X-XX rimrock ds"
+rm8_5_2012_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2012", "WC_00X-XX rimrock ds.xlsx"), sheet = "4675") |>
+  filter(Temp != "°C") |>
+  mutate(Temp = as.numeric(Temp))
+
+# 2011 - labeled "WC_XXX-XX rimrock ds"
+rm8_5_2011_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2011", "UDWC", "WC_XXX-XX rimrock ds.xlsx"), sheet = "4674 Data") |>
+  rename(Temp = `Temp (°C)`)
+
+rm8_5_2011_2021 <- bind_rows(rm8_5_2011_raw,
+                              rm8_5_2012_raw,
+                              rm8_5_2013_raw,
+                              rm8_5_2014_raw,
+                              rm8_5_2015_raw,
+                              rm8_5_2016_raw,
+                              rm8_5_2017_raw,
+                              rm8_5_2018_raw,
+                              rm8_5_2019_raw,
+                              rm8_5_2020_raw,
+                              rm8_5_2021_raw) |>
+  rename(date = Date,
+         temperature = Temp) |>
+  select(date, temperature)
+
+rm8_5_full_2011_2025 <- bind_rows(rm8_5_2022_2025,
+                                   rm8_5_2011_2021) |>
+  group_by(date) |>
+  summarize(mean   = mean(temperature, na.rm = T),
+            median = median(temperature, na.rm = T),
+            max    = max(temperature, na.rm = T),
+            min    = min(temperature, na.rm = T)) |>
+  pivot_longer(cols = mean:min, values_to = "temperature", names_to = "statistic")
+
+rm_8_5_historical <- rm8_5_full_2011_2025
+
+usethis::use_data(rm_8_5_historical, overwrite = T)
+```
 
 ```{r}
+rm_8_5_historical |>
+  group_by(year = year(date)) |>
+  summarise(mean_temperature = mean(temperature, na.rm = T),
+            min_temperature  = min(temperature, na.rm = T),
+            max_temperature  = max(temperature, na.rm = T)) |>
+  knitr::kable(digits = 2)
 
+ggplot() +
+  geom_line(data = rm_8_5_historical, aes(x = date, y = temperature, color = statistic)) +
+  scale_color_manual(values = colors_small) +
+  theme_minimal()
 ```
 
 ### Historical weather forecasts

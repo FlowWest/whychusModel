@@ -1,0 +1,2 @@
+target,lag,n_features,hidden_layers,hidden_size,n_train,n_test,R2,RMSE,MAE
+RM 8.5 Tmax,yes_tar,11,5,12,611,151,0.9539,0.8044,0.5778
