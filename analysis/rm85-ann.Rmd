@@ -18,6 +18,7 @@ library(tidyverse)
 library(lubridate)
 library(neuralnet)
 library(caret)
+library(randomForest)
 library(whychusInputs)
 ```
 
@@ -331,4 +332,105 @@ cat("Scaler saved to: ", file.path(output_dir, "rm85_scaler.rds"),    "\n")
 # scaler2 <- readRDS(file.path(output_dir, "rm85_scaler.rds"))
 # new_scaled <- predict(scaler2, new_data)   # new_data must have same feature names
 # preds      <- predict(model2, new_scaled)[, 1]
+```
+
+# 9. Random Forest Comparison
+
+## 9a. Fit Random Forest
+
+RF doesn't require feature scaling, so raw `X_train`/`X_test` are used directly.
+
+```{r fit-rf}
+rf_train_df <- as.data.frame(X_train) |> mutate(target = y_train)
+
+set.seed(42)
+rf_model <- randomForest(
+  formula    = as.formula(paste("target ~", paste(names(X), collapse = " + "))),
+  data       = rf_train_df,
+  ntree      = 500,
+  importance = TRUE
+)
+
+cat("RF training complete.\n")
+```
+
+## 9b. Evaluate Random Forest
+
+```{r evaluate-rf}
+y_pred_rf <- predict(rf_model, as.data.frame(X_test))
+
+SSres_rf <- sum((y_pred_rf - y_test)^2)
+R2_rf    <- 1 - SSres_rf / SStot
+RMSE_rf  <- sqrt(SSres_rf / length(y_pred_rf))
+MAE_rf   <- mean(abs(y_pred_rf - y_test))
+
+cat(sprintf("RF R²:   %.4f\n",    R2_rf))
+cat(sprintf("RF RMSE: %.4f °C\n", RMSE_rf))
+cat(sprintf("RF MAE:  %.4f °C\n", MAE_rf))
+```
+
+## 9c. ANN vs RF — Summary Table
+
+```{r comparison-table}
+comparison <- tibble(
+  model      = c("ANN", "Random Forest"),
+  lag        = lag,
+  n_features = ncol(X),
+  R2         = round(c(R2,   R2_rf),   4),
+  RMSE       = round(c(RMSE, RMSE_rf), 4),
+  MAE        = round(c(MAE,  MAE_rf),  4)
+)
+
+print(comparison)
+write_csv(comparison, file.path(output_dir, "rm85_model_comparison.csv"))
+```
+
+## 9d. Predicted vs Observed — Side by Side
+
+```{r plot-comparison}
+ax_max <- ceiling(max(c(y_pred, y_pred_rf, y_test)) * 1.05)
+
+bind_rows(
+  tibble(model = "ANN",          predicted = y_pred,    observed = y_test),
+  tibble(model = "Random Forest", predicted = y_pred_rf, observed = y_test)
+) |>
+  ggplot(aes(x = predicted, y = observed, color = model)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  geom_abline(slope = 1, intercept = 0,
+              color = "black", linetype = "dashed", linewidth = 0.8) +
+  facet_wrap(~model) +
+  coord_equal(xlim = c(0, ax_max), ylim = c(0, ax_max)) +
+  scale_color_manual(values = c("ANN" = "#185FA5", "Random Forest" = "#E87722")) +
+  labs(
+    title    = "ANN vs Random Forest — RM 8.5 max daily temperature",
+    subtitle = sprintf("ANN R² = %.3f  |  RF R² = %.3f", R2, R2_rf),
+    x = "Predicted Tmax (°C)", y = "Observed Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none", panel.grid.minor = element_blank())
+```
+
+## 9e. RF Variable Importance
+
+```{r plot-importance}
+as.data.frame(importance(rf_model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#E87722") +
+  coord_flip() +
+  labs(
+    title = "Random Forest — Variable Importance (RM 8.5)",
+    x     = NULL,
+    y     = "% Increase in MSE"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 9f. Save RF Model
+
+```{r save-rf}
+saveRDS(rf_model, file.path(output_dir, "rm85_rf_model.rds"))
+cat("RF model saved to:", file.path(output_dir, "rm85_rf_model.rds"), "\n")
 ```
