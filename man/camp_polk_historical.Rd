@@ -8,7 +8,7 @@
 A data frame with 15,578 rows and 10 columns:
 \describe{
 \item{\code{station_nbr}}{Numeric. OWRD station number (14076100).}
-\item{\code{date}}{Date. Observation date, ranging from 2015-10-01 to present.}
+\item{\code{date}}{Date. Observation date, ranging from 2015-10-01 to 2026-03-29}
 \item{\code{value}}{Numeric. Water temperature in degrees Celsius. Discharge in cfs}
 \item{\code{published_status}}{Character. OWRD data publication status (e.g. \code{"PVL"} = provisional).}
 \item{\code{download_date}}{Character. Date and time the data were downloaded from OWRD.}

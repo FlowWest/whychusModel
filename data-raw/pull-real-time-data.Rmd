@@ -33,7 +33,7 @@ OWRD station ID 14076100:
 # instantaneous flow
 flow_daily_raw <- get_owrd_hydro(
   station_nbr = "14076100",
-  start_date = Sys.Date()-5,
+  start_date = Sys.Date()-100,
   end_date = Sys.Date()-1,
   data_source = "Instantaneous_Flow"
 )
@@ -75,6 +75,86 @@ ggplot(data = flow,
   theme_minimal()
 
 ```
+
+## Whychus Cr at Sisters, OR - flow
+
+This site is in Sisters
+
+OWRD station ID 14076050:
+<https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14076050>
+
+```{r}
+# instantaneous flow
+flow_daily_raw_sisters <- get_owrd_hydro(
+  station_nbr = "14076050",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "Instantaneous_Flow"
+)
+
+flow_sisters <- flow_daily_raw_sisters |> 
+  rename(date = record_date, 
+         flow_cfs = instananteous_flow_cfs) |> 
+  mutate(date = mdy_hm(date)) |> 
+  mutate(station_name = "Whychus Cr at Sisters, OR (OWRD)") |> 
+  glimpse()
+
+ggplot(data = flow_sisters, 
+       aes(x = date, y = flow_cfs)) + 
+  geom_line() +
+  theme_minimal()
+```
+
+## Whychus Cr NR Sisters, OR - flow and temperature
+
+This site is upstream from sisters but includes Temperature and Flow
+
+OWRD station ID 14075000:
+<https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14075000>
+
+```{r}
+# instantaneous flow
+flow_daily_raw_nr_sisters <- get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "Instantaneous_Flow"
+)
+
+flow_nr_sisters <- flow_daily_raw_nr_sisters |> 
+  rename(date = record_date, 
+         flow_cfs = instananteous_flow_cfs) |> 
+  mutate(date = mdy_hm(date)) |> 
+  mutate(station_name = "Whychus Cr NR Sisters, OR (OWRD)") |> 
+  glimpse()
+
+ggplot(data = flow_nr_sisters, 
+       aes(x = date, y = flow_cfs)) + 
+  geom_line() +
+  theme_minimal()
+
+# instantaneous water temperature
+temp_daily_raw_nr_sisters <- get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "WTEMP15"
+) 
+
+temperature_nr_sisters <- temp_daily_raw |> 
+  rename(date = record_date, 
+         temp_c = instantaneous_water_temp_c) |> 
+  mutate(date = mdy_hm(date),
+         download_date = mdy_hm(download_date)) |> 
+  mutate(station_name = "Whychus Cr NR Sisters, OR (OWRD)") |> 
+  glimpse()
+
+ggplot(data = temperature_nr_sisters, 
+       aes(x = date, y = temp_c)) + 
+  geom_line() +
+  theme_minimal()
+```
+
 
 ## NWS Forecasts
 

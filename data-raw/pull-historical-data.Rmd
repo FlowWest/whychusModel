@@ -231,6 +231,144 @@ ggplot() +
 
 ```
 
+### Whychus Cr Near Sisters - Instream Temperature and Flow
+
+This site is located upstream of Sisters. It collects temperature and flow. 
+
+Currently pulled from OWRD 2015-10-01 - 2026-04-14
+
+```{r eval=FALSE}
+wns_daily_mean_temperature <-  get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = '2015-01-01',
+  end_date = Sys.Date(),
+  data_source = "WTEMP_MEAN"
+) |> 
+  rename(value = daily_mean_water_temp_c) |> 
+  mutate(variable = "water temperature (c)",
+         statistic = "mean",
+         location = "whychus cr nr sisters, or") |> 
+  glimpse()
+
+
+wns_daily_min_temperature <-  get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = '2015-01-01',
+  end_date = Sys.Date(),
+  data_source = "WTEMP_MIN"
+) |> 
+  rename(value = daily_min_water_temp_f) |> 
+  mutate(variable = "water temperature (c)",
+         statistic = "min",
+         location = "whychus cr nr sisters, or") |> 
+  select(-time_observed) |> 
+  glimpse()
+
+wns_daily_max_temperature <-  get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = '2015-01-01',
+  end_date = Sys.Date(),
+  data_source = "WTEMP_MAX"
+) |> 
+  rename(value = daily_max_water_temp_c) |> 
+  mutate(variable = "water temperature (c)",
+         statistic = "max",
+         location = "whychus cr nr sisters, or") |> 
+  select(-time_observed) |> 
+  glimpse()
+
+wns_mean_daily_flow <-  get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = '2015-01-01',
+  end_date = Sys.Date(),
+  data_source = "MDF"
+) |> 
+  rename(value = mean_daily_flow_cfs) |> 
+  mutate(variable = "discharge (cfs)",
+         statistic = "mean",
+         location = "whychus cr nr sisters, or") |> 
+  glimpse()
+
+whychus_nr_sisters_historical <- bind_rows(
+  wns_daily_max_temperature,
+  wns_daily_min_temperature,
+  wns_daily_mean_temperature,
+  wns_mean_daily_flow
+) |> 
+  rename(date = record_date) |> 
+  mutate(date = as.Date(
+    parse_date_time(date, orders = c("mdy", "mdy HM"))
+    )) |> 
+  glimpse()
+
+usethis::use_data(whychus_nr_sisters_historical, overwrite = T)
+```
+
+```{r}
+whychus_nr_sisters_historical |> 
+  group_by(year = year(date), statistic, variable) |> 
+  summarise(n_values = n()) |> 
+  knitr::kable()
+
+ggplot() + 
+  geom_line(data = whychus_nr_sisters_historical, aes(x = date, y = value, color = statistic)) +
+  scale_color_manual(values = colors_small) +
+  facet_wrap(~variable, scales = "free_y") + 
+  theme_minimal() +
+  ggtitle("WHYCHUS CR NR SISTERS, OR - 14075000")
+
+```
+
+### Whychus Cr at Sisters - Flow
+
+This site is in Sisters, Oregon. The site only collects flow. 
+
+TODO: change or add instantaneous 
+
+Currently pulled from OWRD 2015-10-01 - 2026-04-14
+
+```{r eval=FALSE}
+was_mean_daily_flow <-  get_owrd_hydro(
+  station_nbr = "14076050",
+  start_date = '2015-01-01',
+  end_date = Sys.Date(),
+  data_source = "MDF"
+) |> 
+  rename(value = mean_daily_flow_cfs) |> 
+  mutate(variable = "discharge (cfs)",
+         statistic = "mean",
+         location = "whychus cr at sisters, or") |> 
+  glimpse()
+
+whychus_at_sisters_historical <- wns_mean_daily_flow |> 
+  rename(date = record_date) |> 
+  mutate(date = as.Date(
+    parse_date_time(date, orders = c("mdy", "mdy HM"))
+    )) |> 
+  glimpse()
+
+usethis::use_data(whychus_at_sisters_historical, overwrite = T)
+```
+
+
+```{r}
+whychus_at_sisters_historical |> 
+  group_by(year = year(date), statistic, variable) |> 
+  summarise(n_values = n()) |> 
+  knitr::kable()
+
+ggplot() + 
+  geom_line(data = whychus_at_sisters_historical, aes(x = date, y = value, color = statistic)) +
+  scale_color_manual(values = colors_small) +
+  theme_minimal() +
+  ggtitle("WHYCHUS CR AT SISTERS, OR - 14076050") +
+  ylab("Mean Daily Flow (cfs)")
+
+```
+
+
+
+
 ### River Mile 8.5 Instream Temperature
 
 Collected using a HOBO datalogger by Upper Deschutes Watershed Council 

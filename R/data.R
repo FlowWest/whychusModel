@@ -18,7 +18,7 @@
 #' @format A data frame with 15,578 rows and 10 columns:
 #' \describe{
 #'   \item{\code{station_nbr}}{Numeric. OWRD station number (14076100).}
-#'   \item{\code{date}}{Date. Observation date, ranging from 2015-10-01 to present.}
+#'   \item{\code{date}}{Date. Observation date, ranging from 2015-10-01 to 2026-03-29}
 #'   \item{\code{value}}{Numeric. Water temperature in degrees Celsius. Discharge in cfs}
 #'   \item{\code{published_status}}{Character. OWRD data publication status (e.g. \code{"PVL"} = provisional).}
 #'   \item{\code{download_date}}{Character. Date and time the data were downloaded from OWRD.}
@@ -49,3 +49,51 @@
 #' @source Upper Deschutes Watershed Council continuous temperature monitoring
 #'   program. Data compiled from annual UDWC data submission files (2011–2025).
 "rm_8_5_historical"
+
+#' Historical instream water temperature and discharge at WHYCHUS CR AT SISTERS, OR
+#'
+#' Daily discharge data collected by the Oregon Water Resources
+#' Department (OWRD) at the WHYCHUS CR AT SISTERS, OR monitoring station (station 14076050) on
+#' the Whychus.
+#'
+#' @format A data frame with 4122 rows and 10 columns:
+#' \describe{
+#'   \item{\code{station_nbr}}{Numeric. OWRD station number (14076050).}
+#'   \item{\code{date}}{Date. Observation date, ranging from 2015-10-01 to 2026-04-14}
+#'   \item{\code{value}}{Numeric.Discharge in cfs}
+#'   \item{\code{published_status}}{Character. OWRD data publication status (e.g. \code{"PVL"} = provisional).}
+#'   \item{\code{download_date}}{Character. Date and time the data were downloaded from OWRD.}
+#'   \item{\code{variable}}{Character. Variable name as returned by OWRD API (e.g. \code{"water temperature (c)", discharge (cfs)}).}
+#'   \item{\code{statistic}}{Character. Summary statistic: \code{"max"}, \code{"min"}, \code{"mean"}.}
+#'   \item{\code{location}}{Character. Station location name (\code{"camp polk"}).}
+#'   \item{\code{estimated}}{Character. Flag indicating whether the value was estimated. \code{NA} if not estimated.}
+#'   \item{\code{revised}}{Logical. Flag indicating whether the value has been revised. \code{NA} if not revised.}
+#' }
+#'
+#' @source Oregon Water Resources Department Near Real-Time Hydrograph:
+#'   \url{https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14076050}
+"whychus_at_sisters_historical"
+
+#' Historical instream water temperature and discharge at WHYCHUS CR NR SISTERS, OR
+#'
+#' Daily instream water temperature and discharge data collected by the Oregon Water Resources
+#' Department (OWRD) at the WHYCHUS CR NR SISTERS, OR monitoring station (station 14075000) on
+#' the Whychus.
+#'
+#' @format A data frame with 15,390 rows and 10 columns:
+#' \describe{
+#'   \item{\code{station_nbr}}{Numeric. OWRD station number (14075000).}
+#'   \item{\code{date}}{Date. Observation date, ranging from 2015-10-01 to 2026-04-14}
+#'   \item{\code{value}}{Numeric. Water temperature in degrees Celsius. Discharge in cfs}
+#'   \item{\code{published_status}}{Character. OWRD data publication status (e.g. \code{"PVL"} = provisional).}
+#'   \item{\code{download_date}}{Character. Date and time the data were downloaded from OWRD.}
+#'   \item{\code{variable}}{Character. Variable name as returned by OWRD API (e.g. \code{"water temperature (c)", discharge (cfs)}).}
+#'   \item{\code{statistic}}{Character. Summary statistic: \code{"max"}, \code{"min"}, \code{"mean"}.}
+#'   \item{\code{location}}{Character. Station location name (\code{"camp polk"}).}
+#'   \item{\code{estimated}}{Character. Flag indicating whether the value was estimated. \code{NA} if not estimated.}
+#'   \item{\code{revised}}{Logical. Flag indicating whether the value has been revised. \code{NA} if not revised.}
+#' }
+#'
+#' @source Oregon Water Resources Department Near Real-Time Hydrograph:
+#'   \url{https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14075000}
+"whychus_nr_sisters_historical"
