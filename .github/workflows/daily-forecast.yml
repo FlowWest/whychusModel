@@ -12,6 +12,9 @@ jobs:
   forecast:
     runs-on: ubuntu-latest
 
+    env:
+      R_LIBS_USER: /home/runner/R/library   # single consistent library path
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,28 +30,41 @@ jobs:
       - name: Cache R packages
         uses: actions/cache@v4
         with:
-          path: ${{ env.R_LIBS_USER }}
-          key: r-4.4-pkgs-v1
+          path: /home/runner/R/library
+          key: r-4.4-pkgs-v2
           restore-keys: r-4.4-
 
       - name: Install system libraries
         run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
 
+      - name: Create R library directory
+        run: mkdir -p /home/runner/R/library
+
       - name: Install R packages
         run: |
           Rscript -e '
+            lib <- Sys.getenv("R_LIBS_USER")
+            .libPaths(c(lib, .libPaths()))
             pkgs <- c("tidyverse", "lubridate", "randomForest", "zoo",
                       "httr", "httr2", "rvest", "janitor", "readr", "here")
             missing_pkgs <- pkgs[!pkgs %in% rownames(installed.packages())]
             if (length(missing_pkgs) > 0)
-              install.packages(missing_pkgs, repos = "https://cloud.r-project.org")
+              install.packages(missing_pkgs,
+                               repos = "https://cloud.r-project.org",
+                               lib   = lib)
           '
 
       - name: Install whychusModel package
-        run: R CMD INSTALL .
+        run: |
+          Rscript -e '.libPaths(c(Sys.getenv("R_LIBS_USER"), .libPaths()))'
+          R CMD INSTALL --library=/home/runner/R/library .
 
       - name: Run daily forecast
-        run: Rscript analysis/run-daily-forecast.R
+        run: |
+          Rscript -e '
+            .libPaths(c(Sys.getenv("R_LIBS_USER"), .libPaths()))
+            source("analysis/run-daily-forecast.R")
+          '
 
       - name: Commit and push forecast log
         run: |
