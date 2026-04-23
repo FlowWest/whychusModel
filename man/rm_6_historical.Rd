@@ -5,10 +5,10 @@
 \alias{rm_6_historical}
 \title{historical RM 6 instream temperature}
 \format{
-8232 x 3 data frame
+9968 x 3 data frame
 \itemize{
 \item{\code{date: }}{2012-04-23 - 2025-10-17}
-\item{\code{statistic: }}{mean, median, max, min}
+\item{\code{statistic: }}{mean, median, max, min, 7DADM}
 \item{\code{temperature: }}{instream temperature collected by UDWC, degrees C}
 }
 }
@@ -16,6 +16,6 @@
 rm_6_historical
 }
 \description{
-RM 6 historical instream temperature
+RM 6 historical instream temperature - daily statistics
 }
 \keyword{datasets}

@@ -1,4 +1,4 @@
-# whychusInputs
+# whychusModel
 
 An R package of model inputs and data retrieval functions for stream temperature forecasting on Whychus Creek, developed for the Upper Deschutes Watershed Council (UDWC).
 
@@ -6,7 +6,7 @@ An R package of model inputs and data retrieval functions for stream temperature
 
 ```r
 # install.packages("devtools")
-devtools::install_github("FlowWest/whychusInputs")
+devtools::install_github("FlowWest/whychusModel")
 ```
 
 ## Data Objects

@@ -17,7 +17,7 @@ library(tidyverse)
 library(lubridate)
 library(GGally)
 library(patchwork)
-library(whychusInputs)
+library(whychusModel)
 ```
 
 # 1. Join and Prepare Data
@@ -475,4 +475,262 @@ rm6_flow |>
   ) +
   theme_minimal() +
   theme(panel.grid.minor = element_blank())
+```
+
+# 11. Whychus Nr Sisters & Whychus At Sisters
+
+## 11a. Data Availability and Camp Polk Gap Coverage
+
+```{r sisters-prep}
+# Max daily water temperature (May–Sep)
+cp_temp_gage <- camp_polk_historical |>
+  filter(variable == "water temperature (c)", statistic == "max",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, cp_temp = value)
+
+nr_temp_gage <- whychus_nr_sisters_historical |>
+  filter(variable == "water temperature (c)", statistic == "max",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, nr_temp = value)
+
+# Mean daily flow (May–Sep)
+cp_flow_gage <- camp_polk_historical |>
+  filter(variable == "discharge (cfs)", statistic == "mean",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, cp_flow = value)
+
+nr_flow_gage <- whychus_nr_sisters_historical |>
+  filter(variable == "discharge (cfs)", statistic == "mean",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, nr_flow = value)
+
+at_flow_gage <- whychus_at_sisters_historical |>
+  filter(variable == "discharge (cfs)", statistic == "mean",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, at_flow = value)
+
+# Full join: all May–Sep dates where any gage has a record
+gap_df <- cp_temp_gage |>
+  full_join(nr_temp_gage,  by = "date") |>
+  full_join(cp_flow_gage,  by = "date") |>
+  full_join(nr_flow_gage,  by = "date") |>
+  full_join(at_flow_gage,  by = "date") |>
+  arrange(date)
+
+ggplot() +
+  geom_line(data = gap_df, aes(x = date, y = cp_flow, color = "camp polk")) + 
+  geom_line(data = gap_df, aes(x = date, y = nr_flow, color = "whychus near sisters")) + 
+  geom_line(data = gap_df, aes(x = date, y = at_flow, color = "whychus at sisters")) +
+  theme_minimal() + 
+  ylab("flow (cfs)")
+
+# Availability summary
+avail_summary <- tibble(
+  Gage     = c("Camp Polk — Temp", "Nr Sisters — Temp",
+               "Camp Polk — Flow", "Nr Sisters — Flow", "At Sisters — Flow"),
+  N_days   = c(sum(!is.na(gap_df$cp_temp)), sum(!is.na(gap_df$nr_temp)),
+               sum(!is.na(gap_df$cp_flow)), sum(!is.na(gap_df$nr_flow)),
+               sum(!is.na(gap_df$at_flow))),
+  Date_min = c(min(gap_df$date[!is.na(gap_df$cp_temp)]),
+               min(gap_df$date[!is.na(gap_df$nr_temp)]),
+               min(gap_df$date[!is.na(gap_df$cp_flow)]),
+               min(gap_df$date[!is.na(gap_df$nr_flow)]),
+               min(gap_df$date[!is.na(gap_df$at_flow)])),
+  Date_max = c(max(gap_df$date[!is.na(gap_df$cp_temp)]),
+               max(gap_df$date[!is.na(gap_df$nr_temp)]),
+               max(gap_df$date[!is.na(gap_df$cp_flow)]),
+               max(gap_df$date[!is.na(gap_df$nr_flow)]),
+               max(gap_df$date[!is.na(gap_df$at_flow)]))
+)
+
+cat("--- Data availability by gage (May–Sep) ---\n")
+print(avail_summary)
+```
+
+```{r sisters-gap-analysis}
+# When Camp Polk temperature is missing, do the other gages have data?
+cp_offline <- gap_df |>
+  filter(is.na(cp_temp)) |>
+  mutate(
+    nr_temp_avail = !is.na(nr_temp)
+  )
+
+cat(sprintf("Days with Camp Polk temp missing (May–Sep): %d\n", nrow(cp_offline)))
+cat(sprintf("  Nr Sisters temp available: %d (%.0f%%)\n",
+            sum(cp_offline$nr_temp_avail),
+            100 * mean(cp_offline$nr_temp_avail)))
+```
+
+```{r}
+gap_df |>
+  select(date,
+         `Camp Polk Temp`  = cp_temp,
+         `Nr Sisters Temp` = nr_temp,
+         `Camp Polk Flow`  = cp_flow,
+         `Nr Sisters Flow` = nr_flow,
+         `At Sisters Flow` = at_flow) |>
+  pivot_longer(-date, names_to = "gage", values_to = "value") |>
+  mutate(
+    has_data      = !is.na(value),
+    year          = factor(year(date)),
+    month         = month(date, label = TRUE, abbr = TRUE),
+    days_in_month = days_in_month(date),
+    type          = if_else(str_detect(gage, "Temp"), "Temperature", "Flow"),
+    gage          = factor(gage, levels = c("Camp Polk Temp", "Nr Sisters Temp",
+                                            "At Sisters Flow", "Nr Sisters Flow",
+                                            "Camp Polk Flow"))
+  ) |>
+  group_by(type, year, month, gage) |>
+  summarise(
+    days_present  = sum(has_data),
+    days_in_month = first(days_in_month),
+    pct_present   = days_present / days_in_month,
+    .groups = "drop"
+  ) |>
+  mutate(
+    coverage = cut(pct_present,
+                   breaks = c(-Inf, 0, 0.25, 0.5, 0.75, 1),
+                   labels = c("No data", "1–25%", "26–50%", "51–75%", "76–100%"),
+                   include.lowest = TRUE)
+  ) |>
+  ggplot(aes(x = month, y = gage, fill = coverage)) +
+  geom_tile(height = 0.8, color = "white", linewidth = 0.4) +
+  scale_fill_manual(
+    values = c(
+      "No data"  = "#D9D9D9",
+      "1–25%"    = "#E8A598",
+      "26–50%"   = "#F0C27F",
+      "51–75%"   = "#A8C5A0",
+      "76–100%"  = "#4E8B6F"
+    ),
+    name = "Days with data",
+    drop = FALSE
+  ) +
+  facet_grid(year ~ type, switch = "y") +
+  labs(x = NULL, y = NULL,
+       title = "Data availability by gage and year") +
+  theme_minimal(base_size = 9) +
+  theme(
+    legend.position  = "bottom",
+    legend.key.width = unit(0.8, "cm"),
+    panel.grid       = element_blank(),
+    axis.text.x      = element_text(size = 8),
+    axis.text.y      = element_text(size = 8),
+    strip.text.x     = element_text(size = 10, face = "plain"),
+    strip.text.y     = element_text(size = 8),
+    strip.placement  = "outside",
+    panel.spacing    = unit(0.3, "lines")
+  )
+```
+
+## 11b. Nr Sisters Temperature vs Camp Polk Temperature
+
+```{r sisters-temp-scatter}
+temp_joint <- cp_temp_gage |>
+  inner_join(nr_temp_gage, by = "date") |>
+  mutate(month_lab = month(date, label = TRUE)) |>
+  drop_na()
+
+cat(sprintf("Paired days (Camp Polk & Nr Sisters temp): %d\n", nrow(temp_joint)))
+r_temp  <- cor(temp_joint$cp_temp, temp_joint$nr_temp, use = "complete.obs")
+lm_temp <- lm(cp_temp ~ nr_temp, data = temp_joint)
+cat(sprintf("Pearson r: %.3f  |  slope: %.2f  |  intercept: %.2f\n",
+            r_temp, coef(lm_temp)[2], coef(lm_temp)[1]))
+
+ggplot(temp_joint, aes(x = nr_temp, y = cp_temp, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.9, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "grey60",
+              linewidth = 0.6, linetype = "dotted") +
+  scale_color_viridis_d(option = "C", name = "Month") +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f  |  slope = %.2f  |  intercept = %.2f",
+                           r_temp, coef(lm_temp)[2], coef(lm_temp)[1]),
+           size = 3.5, color = "grey30") +
+  labs(
+    title    = "Nr Sisters vs Camp Polk — daily max water temperature (May–Sep)",
+    subtitle = "Dotted = 1:1 line; dashed = OLS fit",
+    x = "Nr Sisters Tmax (°C)", y = "Camp Polk Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+```{r sisters-temp-diff, fig.height=4}
+temp_joint |>
+  mutate(diff = cp_temp - nr_temp) |>
+  ggplot(aes(x = yday(date), y = diff, color = month_lab)) +
+  geom_hline(yintercept = 0, color = "grey60", linetype = "dashed") +
+  geom_point(alpha = 0.3, size = 0.9) +
+  geom_smooth(method = "loess", span = 0.4, se = TRUE,
+              color = "#185FA5", fill = "#185FA5", alpha = 0.15, linewidth = 1) +
+  scale_color_viridis_d(option = "C", name = "Month") +
+  labs(
+    title    = "Temperature difference (Camp Polk − Nr Sisters) across the season",
+    subtitle = "Positive = Camp Polk warmer than Nr Sisters",
+    x = "Julian day", y = "Tmax difference (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 11c. Flow Relationships — Nr Sisters and At Sisters vs Camp Polk
+
+```{r sisters-flow-flow-scatter, fig.height=5}
+# Nr Sisters flow vs Camp Polk flow
+nr_cp_flow <- cp_flow_gage |>
+  inner_join(nr_flow_gage, by = "date") |>
+  mutate(month_lab = month(date, label = TRUE)) |>
+  drop_na()
+
+# At Sisters flow vs Camp Polk flow
+at_cp_flow <- cp_flow_gage |>
+  inner_join(at_flow_gage, by = "date") |>
+  mutate(month_lab = month(date, label = TRUE)) |>
+  drop_na()
+
+r_nr_cp <- cor(nr_cp_flow$cp_flow, nr_cp_flow$nr_flow, use = "complete.obs")
+r_at_cp <- cor(at_cp_flow$cp_flow, at_cp_flow$at_flow, use = "complete.obs")
+
+cat(sprintf("Paired days (Nr Sisters & Camp Polk flow): %d  |  r = %.3f\n",
+            nrow(nr_cp_flow), r_nr_cp))
+cat(sprintf("Paired days (At Sisters & Camp Polk flow): %d  |  r = %.3f\n",
+            nrow(at_cp_flow), r_at_cp))
+
+p_nr_flow <- ggplot(nr_cp_flow, aes(x = nr_flow, y = cp_flow, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.1) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.8, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "grey60",
+              linewidth = 0.6, linetype = "dotted") +
+  scale_color_viridis_d(option = "D", name = "Month") +
+  scale_x_log10(labels = scales::comma) +
+  scale_y_log10(labels = scales::comma) +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f", r_nr_cp), size = 3.5, color = "grey30") +
+  labs(x = "Nr Sisters flow (cfs, log)", y = "Camp Polk flow (cfs, log)",
+       title = "Nr Sisters vs Camp Polk flow") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+p_at_flow <- ggplot(at_cp_flow, aes(x = at_flow, y = cp_flow, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.1) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.8, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "grey60",
+              linewidth = 0.6, linetype = "dotted") +
+  scale_color_viridis_d(option = "D", name = "Month") +
+  scale_x_log10(labels = scales::comma) +
+  scale_y_log10(labels = scales::comma) +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f", r_at_cp), size = 3.5, color = "grey30") +
+  labs(x = "At Sisters flow (cfs, log)", y = "Camp Polk flow (cfs, log)",
+       title = "At Sisters vs Camp Polk flow") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+(p_nr_flow | p_at_flow) +
+  plot_annotation(title = "Flow relationships — upstream gages vs Camp Polk (May–Sep)",
+                  subtitle = "Both axes log scale; dotted = 1:1 line")
 ```

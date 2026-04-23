@@ -9,6 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
+library(whychusModel)
 
 colors_small <-  c("#9A8822", "#F5CDB4", "#F8AFA8", "#FDDDA0", "#74A089", #Royal 2
                    "#899DA4", "#C93312", "#DC863B" # royal 1 (- 3)
@@ -19,27 +20,68 @@ colors_small <-  c("#9A8822", "#F5CDB4", "#F8AFA8", "#FDDDA0", "#74A089", #Royal
 
 Currently 2012-04-23 - 2025-10-17
 
+**Notes**
+Rivermile 6 has between 1 and 3 loggers in the stream at any given day/time. The data is process as the average between all loggers with data for each year. 
+
 ```{r include=FALSE}
 monitoring_location_id <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Monitoring_Locations")
 # 2025
 
 # TODO: for 2024 and 2025 - there are three sheets with 006-00 (WC_006-00_21629136, WC_006-00_21555606, WC_006-00_21564982)
-# Should I pull all of them and average? 
-rm6_2025_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature",  "2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_006-00_21629136", skip = 3) |> 
-  select(date = DATE, temperature = TEMP_r) |> 
-  mutate(date = as_datetime(date)) 
+# Should I pull all of them and average - yes? 
+rm6_2025_raw_1 <- readxl::read_xlsx(here::here("data-raw", "historical-temperature",  "2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_006-00_21629136", skip = 3) |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> glimpse()
+
+rm6_2025_raw_2 <- readxl::read_xlsx(here::here("data-raw", "historical-temperature",  "2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_006-00_21555606", skip = 3) |> 
+  select(date = DATE, time = TIME,temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> glimpse()
+
+rm6_2025_raw_3 <- readxl::read_xlsx(here::here("data-raw", "historical-temperature",  "2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_006-00_21564982", skip = 3) |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> glimpse()
+
+rm6_2025_raw <- bind_rows(
+  rm6_2025_raw_1,
+  rm6_2025_raw_2,
+  rm6_2025_raw_3) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) 
 
 # 2024
-rm6_2024_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 21629136", skip = 3) |> 
-  select(date = DATE, temperature = TEMP_r) |> 
-  mutate(date = as_datetime(date)) 
+rm6_2024_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 21629136", skip = 3) |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> glimpse()
 
+rm6_2024_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 21555606", skip = 3) |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> glimpse()
+
+rm6_2024_raw_3 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 21564982", skip = 3) |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> glimpse()
+
+rm6_2024_raw <- bind_rows(
+  rm6_2024_raw_1,
+  rm6_2024_raw_2,
+  rm6_2024_raw_3) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+# 2023 
+# it looks like there's just one 0060 site for this year 
 rm6_2023_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Results") |> 
   mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |> 
   left_join(monitoring_location_id |> 
               select(`Monitoring Location ID`, `Monitoring Location Name`)) |> 
   filter(`Monitoring Location Name` == "WC_006-00")   # filter for the RM6 site
 
+# 2022
+# it looks like there's just one 0060 site for this year 
 rm6_2022_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2022_UDWC_WQM-ContTemp _FINAL.xlsx"), sheet = "Results") |> 
   mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |> 
   left_join(monitoring_location_id |> 
@@ -50,56 +92,198 @@ rm6_2025_2022 <- bind_rows(rm6_2023_raw,
                            rm6_2022_raw) |> 
   janitor::clean_names() |> 
   rename(date = activity_start_date,
-         temperature = result_value) |> 
+         temperature = result_value,
+         time = activity_start_time) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
   select(date, temperature) |> 
-  bind_rows(rm6_2024_raw, rm6_2025_raw)
+  bind_rows(rm6_2024_raw, rm6_2025_raw) |> glimpse()
 
-# rm6_2021_raw_1 <- readxl::read_xlsx(here::here("data-raw","UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423312", range = "A5:C1830")
+# 2021
 rm6_2021_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423310", range = "A5:C1040") |> 
-  rename(Date = DATE,
-         Time = TIME,
-         Temp = TEMP_r)
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2021_raw_3 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423312", range = "A5:C1040") |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2021_raw <- bind_rows(
+  rm6_2021_raw_2,
+  rm6_2021_raw_3) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+#2020
+rm6_2020_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2020_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423294", range = "A5:C5092") |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2020_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2020_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 10792839", range = "A5:C5092") |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2020_raw <- bind_rows(
+  rm6_2020_raw_1,
+  rm6_2020_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+# 2019
+rm6_2019_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_006.00_10792864", range = "A5:C4694") |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2019_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_006.00_10792842", range = "A5:C4694") |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2019_raw <- bind_rows(
+  rm6_2019_raw_1,
+  rm6_2019_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+# 2018
+rm6_2018_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_006-00_354425", range = "A5:C5264") |>       select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2018_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_006-00_10792864", range = "A5:C5264") |> 
+  select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse()
+
+rm6_2018_raw <- bind_rows(
+  rm6_2018_raw_1,
+  rm6_2018_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+# 2017
+rm6_2017_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_006-00_353753", range = "A5:C3511") |> select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2017_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_006-00_10792863", range = "A5:C3511") |> select(date = DATE, time = TIME, temperature = TEMP_r) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2017_raw <- bind_rows(
+  rm6_2017_raw_1,
+  rm6_2017_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+#2016
+rm6_2016_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC-Cont-Temp-2016","WC_006-00.xlsx"), sheet = "354424 Data") |> 
+  select(date = Date, time = Time, temperature = `Temp (°C)`) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2016_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC-Cont-Temp-2016","WC_006-00.xlsx"), sheet = "10127725 Data") |> 
+  select(date = Date, time = Time, temperature = `Temp (°C)`) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2016_raw <- bind_rows(
+  rm6_2016_raw_1,
+  rm6_2016_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+#2015
+rm6_2015_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2015-UDWC-Cont-Temp-Data","WC_006-00.xlsx"), sheet = "354426 Data") |> 
+  select(date = Date, time = Time, temperature = `Temp (°C)`) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2015_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2015-UDWC-Cont-Temp-Data","WC_006-00.xlsx"), sheet = "10127687 Data") |> 
+  select(date = Date, time = Time, temperature = `Temp (°C)`) |>
+  mutate(date = date + hms::as_hms(time),
+         date = lubridate::round_date(date, "1 hour")) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2015_raw <- bind_rows(
+  rm6_2015_raw_1,
+  rm6_2015_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
+
+#2014
+rm6_2014_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2014","WC_006-00.xlsx"), sheet = "3544424 Data") |> 
+  select(date = `Date(yyyy-mm-dd)`, time = `Time(hh:mm:ss)`, temperature = `Temperature (°C)`) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S"))) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2014_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2014","WC_006-00.xlsx"), sheet = "5768 Data") |> 
+  select(date = `Date(yyyy-mm-dd)`, time = `Time(hh:mm:ss)`, temperature = `Temperature (°C)`) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S")),
+         date = lubridate::round_date(date, "1 hour")) |> 
+  select(date, temperature) |> 
+  glimpse() 
+
+rm6_2014_raw <- bind_rows(
+  rm6_2014_raw_1,
+  rm6_2014_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
 
 
-rm6_2020_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2020_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_006-00 20423294", range = "A5:C5092") |> 
-  rename(Date = DATE,
-         Time = TIME,
-         Temp = TEMP_r)
+#2013
+rm6_2013_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2013","WC_006-00.xlsx"), sheet = "353754 Data") |> 
+  select(date = Date, time = Time, temperature = `°C`) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S")),
+         date = lubridate::round_date(date, "1 hour")) |> 
+  select(date, temperature) |> 
+  glimpse() 
 
+rm6_2013_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2013","WC_006-00.xlsx"), sheet = "4675 Data") |> 
+  select(date = Date, time = Time, temperature = `°C`) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S")),
+         date = lubridate::round_date(date, "1 hour")) |> 
+  select(date, temperature) |> 
+  glimpse() 
 
-rm6_2019_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_006.00_10792864", range = "A5:C4694") |> 
-  rename(Date = DATE,
-         Time = TIME,
-         Temp = TEMP_r)
+rm6_2013_raw <- bind_rows(
+  rm6_2013_raw_1,
+  rm6_2013_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
 
+#2012
+rm6_2012_raw_1 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2012","WC_006-00.xlsx"), sheet = "4673") |> 
+  mutate(Temp = as.numeric(Temp)) |> 
+  select(date = Date, time = Time, temperature = Temp) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S")),
+         date = lubridate::round_date(date, "1 hour")) |> 
+  select(date, temperature) |> 
+  filter(!is.na(date)) |> 
+  glimpse() 
 
-rm6_2018_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_006-00_354425", range = "A5:C5264") |> 
-  rename(Date = DATE,
-         Time = TIME,
-         Temp = TEMP_r)
+rm6_2012_raw_2 <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2012","WC_006-00.xlsx"), sheet = "2165 DUP") |> 
+  mutate(Temp = as.numeric(Temp)) |> 
+  select(date = Date, time = Time, temperature = Temp) |> 
+  mutate(date = date + hms::as_hms(format(time, "%H:%M:%S")),
+         date = lubridate::round_date(date, "1 hour")) |> 
+  select(date, temperature) |> 
+  filter(!is.na(date)) |> 
+  glimpse() 
 
-
-rm6_2017_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_006-00_353753", range = "A5:C3511") |> 
-  rename(Date = DATE,
-         Time = TIME,
-         Temp = TEMP_r)
-
-rm6_2016_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "UDWC-Cont-Temp-2016","WC_006-00.xlsx"), sheet = "354424 Data") |> 
-  rename(Temp = `Temp (°C)`)
-
-rm6_2015_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2015-UDWC-Cont-Temp-Data","WC_006-00.xlsx"), sheet = "354426 Data") |> 
-  rename(Temp = `Temp (°C)`)
-
-rm6_2014_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2014","WC_006-00.xlsx"), sheet = "3544424 Data") |> 
-  rename(Date = `Date(yyyy-mm-dd)`,
-         Time = `Time(hh:mm:ss)`,
-         Temp = `Temperature (°C)`)
-
-rm6_2013_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2013","WC_006-00.xlsx"), sheet = "353754 Data") |> 
-  rename(Temp = `°C`)
-
-rm6_2012_raw <- readxl::read_xlsx(here::here("data-raw","historical-temperature", "2012","WC_006-00.xlsx"), sheet = "4673") |> 
-  mutate(Temp = as.numeric(Temp))
+rm6_2012_raw <- bind_rows(
+  rm6_2012_raw_1,
+  rm6_2012_raw_2) |>
+  summarise(temperature = mean(temperature, na.rm = TRUE), .by = date) |> glimpse()
 
 rm6_2012_2021 <- bind_rows(rm6_2012_raw,
                            rm6_2013_raw,
@@ -111,23 +295,30 @@ rm6_2012_2021 <- bind_rows(rm6_2012_raw,
                            rm6_2019_raw,
                            rm6_2020_raw,
                            rm6_2021_raw_2) |> 
-  rename(date = Date,
-         temperature = Temp) |> 
   select(date, temperature)
 
-rm6_full_2012_2025 <- bind_rows(rm6_2025_2022,
+all_rm_6_dates_and_times <- bind_rows(rm6_2025_2022,
                                 rm6_2012_2021) |> 
-  group_by(date) |> 
-  summarize(mean = mean(temperature, na.rm = T),
-            median = median(temperature, na.rm = T),
-            max = max(temperature, na.rm = T),
-            min = min(temperature, na.rm = T)) |> 
-  pivot_longer(cols = mean:min, values_to = "temperature", names_to = "statistic")
+  filter(!is.na(date))
+
+rm6_full_2012_2025 <- all_rm_6_dates_and_times |>
+  mutate(date = lubridate::floor_date(date, "1 day")) |>
+  group_by(date) |>
+  summarize(
+    mean   = mean(temperature, na.rm = TRUE),
+    median = median(temperature, na.rm = TRUE),
+    max    = max(temperature, na.rm = TRUE),
+    min    = min(temperature, na.rm = TRUE)
+  ) |>
+  mutate(
+    `7DADM` = zoo::rollapply(max, width = 7, FUN = mean, fill = NA, align = "right")
+  ) |>
+  pivot_longer(cols = c(mean:min, `7DADM`), values_to = "temperature", names_to = "statistic") |> glimpse()
 
 rm_6_historical <- rm6_full_2012_2025
 
 usethis::use_data(rm_6_historical, overwrite = T)
-
+usethis::use_data(all_rm_6_dates_and_times, overwrite = T)
 ```
 
 ```{r}
@@ -147,12 +338,12 @@ ggplot() +
 
 ### Camp Polk Instream Temperature and Discharge
 
-Currently pulled from OWRD 2015-10-01 - 2026-03-29
+Currently pulled from OWRD '2011-05-01' - 2026-03-29
 
 ```{r eval=FALSE}
 cp_daily_mean_temperature <-  get_owrd_hydro(
   station_nbr = "14076100",
-  start_date = '2015-01-01',
+  start_date = '2011-05-01',
   end_date = Sys.Date()-1,
   data_source = "WTEMP_MEAN"
 ) |> 
@@ -165,7 +356,7 @@ cp_daily_mean_temperature <-  get_owrd_hydro(
 
 cp_daily_min_temperature <-  get_owrd_hydro(
   station_nbr = "14076100",
-  start_date = '2015-01-01',
+  start_date = '2011-05-01',
   end_date = Sys.Date()-1,
   data_source = "WTEMP_MIN"
 ) |> 
@@ -178,7 +369,7 @@ cp_daily_min_temperature <-  get_owrd_hydro(
 
 cp_daily_max_temperature <-  get_owrd_hydro(
   station_nbr = "14076100",
-  start_date = '2015-01-01',
+  start_date = '2011-05-01',
   end_date = Sys.Date()-1,
   data_source = "WTEMP_MAX"
 ) |> 
@@ -191,7 +382,7 @@ cp_daily_max_temperature <-  get_owrd_hydro(
 
 cp_mean_daily_flow <-  get_owrd_hydro(
   station_nbr = "14076100",
-  start_date = '2015-01-01',
+  start_date = '2011-05-01',
   end_date = Sys.Date()-1,
   data_source = "MDF"
 ) |> 
@@ -201,7 +392,7 @@ cp_mean_daily_flow <-  get_owrd_hydro(
          location = "camp polk") |> 
   glimpse()
 
-camp_polk_historical <- bind_rows(
+camp_polk_historical_raw <- bind_rows(
   cp_daily_max_temperature,
   cp_daily_min_temperature,
   cp_daily_mean_temperature,
@@ -210,21 +401,37 @@ camp_polk_historical <- bind_rows(
   rename(date = record_date) |> 
   mutate(date = as.Date(
     parse_date_time(date, orders = c("mdy", "mdy HM"))
-    )) |> 
+  )) |> 
   glimpse()
 
-usethis::use_data(camp_polk_historical, overwrite = T)
+camp_polk_historical <- camp_polk_historical_raw |>
+  filter(statistic == "max") |>
+  filter(variable == "water temperature (c)") |> 
+  arrange(date) |>
+  mutate(value = zoo::rollapply(value, width = 7, FUN = mean,
+                                      fill = NA, align = "right"),
+         statistic = "7DADM") |> 
+  bind_rows(camp_polk_historical_raw) |> 
+  arrange(date)
+
+camp_polk_flow_historical <- camp_polk_historical_raw |> 
+  filter(variable == "discharge (cfs)") |> 
+  select(date, flow_cfs = value, statistic) |> 
+  arrange(date) |> 
+  glimpse()
+
+usethis::use_data(camp_polk_flow_historical, overwrite = T)
 
 ```
 
 ```{r}
-whychusInputs::camp_polk_historical |> 
+whychusModel::camp_polk_historical |> 
   group_by(year = year(date), statistic, variable) |> 
   summarise(n_values = n()) |> 
   knitr::kable()
 
 ggplot() + 
-  geom_line(data = whychusInputs::camp_polk_historical, aes(x = date, y = value, color = statistic)) +
+  geom_line(data = whychusModel::camp_polk_historical, aes(x = date, y = value, color = statistic)) +
   scale_color_manual(values = colors_small) +
   facet_wrap(~variable, scales = "free_y") + 
   theme_minimal()
@@ -240,7 +447,7 @@ Currently pulled from OWRD 2015-10-01 - 2026-04-14
 ```{r eval=FALSE}
 wns_daily_mean_temperature <-  get_owrd_hydro(
   station_nbr = "14075000",
-  start_date = '2015-01-01',
+  start_date = '2011-01-01',
   end_date = Sys.Date(),
   data_source = "WTEMP_MEAN"
 ) |> 
@@ -253,7 +460,7 @@ wns_daily_mean_temperature <-  get_owrd_hydro(
 
 wns_daily_min_temperature <-  get_owrd_hydro(
   station_nbr = "14075000",
-  start_date = '2015-01-01',
+  start_date = '2011-01-01',
   end_date = Sys.Date(),
   data_source = "WTEMP_MIN"
 ) |> 
@@ -266,7 +473,7 @@ wns_daily_min_temperature <-  get_owrd_hydro(
 
 wns_daily_max_temperature <-  get_owrd_hydro(
   station_nbr = "14075000",
-  start_date = '2015-01-01',
+  start_date = '2011-01-01',
   end_date = Sys.Date(),
   data_source = "WTEMP_MAX"
 ) |> 
@@ -279,7 +486,7 @@ wns_daily_max_temperature <-  get_owrd_hydro(
 
 wns_mean_daily_flow <-  get_owrd_hydro(
   station_nbr = "14075000",
-  start_date = '2015-01-01',
+  start_date = '2011-01-01',
   end_date = Sys.Date(),
   data_source = "MDF"
 ) |> 
@@ -298,7 +505,7 @@ whychus_nr_sisters_historical <- bind_rows(
   rename(date = record_date) |> 
   mutate(date = as.Date(
     parse_date_time(date, orders = c("mdy", "mdy HM"))
-    )) |> 
+  )) |> 
   glimpse()
 
 usethis::use_data(whychus_nr_sisters_historical, overwrite = T)
@@ -330,7 +537,7 @@ Currently pulled from OWRD 2015-10-01 - 2026-04-14
 ```{r eval=FALSE}
 was_mean_daily_flow <-  get_owrd_hydro(
   station_nbr = "14076050",
-  start_date = '2015-01-01',
+  start_date = '2011-01-01',
   end_date = Sys.Date(),
   data_source = "MDF"
 ) |> 
@@ -340,11 +547,11 @@ was_mean_daily_flow <-  get_owrd_hydro(
          location = "whychus cr at sisters, or") |> 
   glimpse()
 
-whychus_at_sisters_historical <- wns_mean_daily_flow |> 
+whychus_at_sisters_historical <- was_mean_daily_flow |> 
   rename(date = record_date) |> 
   mutate(date = as.Date(
     parse_date_time(date, orders = c("mdy", "mdy HM"))
-    )) |> 
+  )) |> 
   glimpse()
 
 usethis::use_data(whychus_at_sisters_historical, overwrite = T)
@@ -399,7 +606,7 @@ rm8_5_2022_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperatu
   filter(`Monitoring Location Name` == "WC_008-50")
 
 rm8_5_2022_2025 <- bind_rows(rm8_5_2023_raw,
-                              rm8_5_2022_raw) |>
+                             rm8_5_2022_raw) |>
   janitor::clean_names() |>
   rename(date = activity_start_date,
          temperature = result_value) |>
@@ -462,28 +669,34 @@ rm8_5_2011_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperatu
   rename(Temp = `Temp (°C)`)
 
 rm8_5_2011_2021 <- bind_rows(rm8_5_2011_raw,
-                              rm8_5_2012_raw,
-                              rm8_5_2013_raw,
-                              rm8_5_2014_raw,
-                              rm8_5_2015_raw,
-                              rm8_5_2016_raw,
-                              rm8_5_2017_raw,
-                              rm8_5_2018_raw,
-                              rm8_5_2019_raw,
-                              rm8_5_2020_raw,
-                              rm8_5_2021_raw) |>
+                             rm8_5_2012_raw,
+                             rm8_5_2013_raw,
+                             rm8_5_2014_raw,
+                             rm8_5_2015_raw,
+                             rm8_5_2016_raw,
+                             rm8_5_2017_raw,
+                             rm8_5_2018_raw,
+                             rm8_5_2019_raw,
+                             rm8_5_2020_raw,
+                             rm8_5_2021_raw) |>
   rename(date = Date,
          temperature = Temp) |>
   select(date, temperature)
 
 rm8_5_full_2011_2025 <- bind_rows(rm8_5_2022_2025,
-                                   rm8_5_2011_2021) |>
+                                  rm8_5_2011_2021) |>
+    filter(!is.na(date)) |>
   group_by(date) |>
-  summarize(mean   = mean(temperature, na.rm = T),
-            median = median(temperature, na.rm = T),
-            max    = max(temperature, na.rm = T),
-            min    = min(temperature, na.rm = T)) |>
-  pivot_longer(cols = mean:min, values_to = "temperature", names_to = "statistic")
+  summarize(
+    mean   = mean(temperature, na.rm = TRUE),
+    median = median(temperature, na.rm = TRUE),
+    max    = max(temperature, na.rm = TRUE),
+    min    = min(temperature, na.rm = TRUE)
+  ) |>
+  mutate(
+    `7DADM` = zoo::rollapply(max, width = 7, FUN = mean, fill = NA, align = "right")
+  ) |>
+  pivot_longer(cols = c(mean:min, `7DADM`), values_to = "temperature", names_to = "statistic") |> glimpse()
 
 rm_8_5_historical <- rm8_5_full_2011_2025
 
@@ -504,6 +717,158 @@ ggplot() +
   theme_minimal()
 ```
 
+### UDWC Camp Polk Logger - temperature
+
+Monitoring location description: "d/s Camp Polk Bridge on DBLT property" (WC_019-50)
+
+```{r include=FALSE}
+# Note: monitoring_location_id already loaded in the RM6 chunk above
+
+# 2025
+cp_logger_2025_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2025_UDWC_Continuous_Temperature_Data_FINAL.xlsx"), sheet = "WC_019-50_21555604", skip = 3) |>
+  select(date = DATE, temperature = TEMP_r) |>
+  mutate(date = as_datetime(date))
+
+# 2024
+cp_logger_2024_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2024_UDWC_Continuous_Temperature_Data_Trimmed_FINAL.xlsx"), sheet = "WC_019-50 21555604", skip = 3) |>
+  select(date = DATE, temperature = TEMP_r) |>
+  mutate(date = as_datetime(date))
+
+# 2023
+cp_logger_2023_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2023_UDWC_WQM-ContTemp-_FINAL.xlsx"), sheet = "Results") |>
+  mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |>
+  left_join(monitoring_location_id |>
+              select(`Monitoring Location ID`, `Monitoring Location Name`, `Monitoring Location Description`)) |>
+  filter(`Monitoring Location Description` == "d/s Camp Polk Bridge on DBLT property")
+
+# 2022
+cp_logger_2022_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2022_UDWC_WQM-ContTemp _FINAL.xlsx"), sheet = "Results") |>
+  mutate(`Monitoring Location ID` = as.character(`Monitoring Location ID`)) |>
+  left_join(monitoring_location_id |>
+              select(`Monitoring Location ID`, `Monitoring Location Name`, `Monitoring Location Description`)) |>
+  filter(`Monitoring Location Description` == "d/s Camp Polk Bridge on DBLT property")
+
+cp_logger_2022_2025 <- bind_rows(cp_logger_2023_raw,
+                                 cp_logger_2022_raw) |>
+  janitor::clean_names() |>
+  rename(date = activity_start_date,
+         temperature = result_value) |>
+  select(date, temperature) |> 
+ bind_rows(cp_logger_2024_raw, cp_logger_2025_raw)  
+
+# 2021
+cp_logger_2021_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2021_ContinuousDataSubmission_Trimmed_FINAL.xlsx"), sheet = "WC_019-50 20423296", range = "A5:C4573") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2020
+cp_logger_2020_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2020_ContinuousDataSubmission_trimmed_FINAL.xlsx"), sheet = "WC_019-50 20423298", range = "A5:C4571") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2019
+cp_logger_2019_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2019_ContinuousTemperature_TrimmedData_FINAL.xlsx"), sheet = "WC_019.5_20423291", range = "A5:C4520") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2018
+cp_logger_2018_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2018_ContinuousDataSubmittal_3.0_FINAL.xlsx"), sheet = "WC_019-50_10127688", range = "A5:C5262") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2017
+cp_logger_2017_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC_2017_ContinuousDataSubmittalTemplate_3.0-Final.xlsx"), sheet = "WC_019-50_10127691", range = "A5:C4158") |>
+  rename(Date = DATE,
+         Time = TIME,
+         Temp = TEMP_r)
+
+# 2016
+cp_logger_2016_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "UDWC-Cont-Temp-2016", "WC_019-50.xlsx"), sheet = "353757_Data") |>
+  rename(Temp = `Temp (°C)`)
+
+# 2015 (two loggers deployed across the season)
+cp_logger_2015a_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2015-UDWC-Cont-Temp-Data", "WC_019-50.xlsx"), sheet = "353755 Data") |>
+  rename(Temp = `Temp (°C)`)
+
+cp_logger_2015b_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2015-UDWC-Cont-Temp-Data", "WC_019-50.xlsx"), sheet = "5769 Data") |>
+  rename(Temp = `Temp (°C)`)
+
+# 2014
+cp_logger_2014_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2014", "WC_019-50.xlsx"), sheet = "354425 Data") |>
+  rename(Date = `Date(yyyy-mm-dd)`,
+         Time = `Time(hh:mm:ss)`,
+         Temp = `Temperature (°C)`)
+
+# 2013
+cp_logger_2013_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2013", "WC_019-50.xlsx"), sheet = "353755 Data") |>
+  rename(Temp = `°C`)
+
+# 2012 - sparse data (~39 readings from one day); logger download failure noted in file
+# Date stored as Excel serial (41020) in cell E12; times stored as day fractions in col A
+cp_logger_2012_raw <- readxl::read_xlsx(here::here("data-raw", "historical-temperature", "2012", "WC_019-50.xlsx"), sheet = "353755 DUP") |> 
+  filter(!is.na(Date)) |>
+  mutate(
+    Temp = as.numeric(Temp),
+    Date = as.Date(Date)
+  ) |>
+  filter(!is.na(Temp)) |>
+  select(Date, Temp) 
+
+cp_logger_2012_2021 <- bind_rows(cp_logger_2012_raw,
+                                 cp_logger_2013_raw,
+                                 cp_logger_2014_raw,
+                                 cp_logger_2015a_raw,
+                                 cp_logger_2015b_raw,
+                                 cp_logger_2016_raw,
+                                 cp_logger_2017_raw,
+                                 cp_logger_2018_raw,
+                                 cp_logger_2019_raw,
+                                 cp_logger_2020_raw,
+                                 cp_logger_2021_raw) |>
+  rename(date = Date,
+         temperature = Temp) |>
+  select(date, temperature)
+
+cp_logger_full <- bind_rows(cp_logger_2022_2025,
+                            cp_logger_2012_2021) |>
+  filter(!is.na(temperature)) |> 
+  group_by(date) |> 
+  summarize(mean   = mean(temperature, na.rm = T),
+            median = median(temperature, na.rm = T),
+            max    = max(temperature, na.rm = T),
+            min    = min(temperature, na.rm = T)) |>
+  pivot_longer(cols = mean:min, values_to = "temperature", names_to = "statistic")
+
+camp_polk_7day_max <- cp_logger_full |>
+  filter(statistic == "max") |>
+  arrange(date) |>
+  mutate(temperature = zoo::rollapply(temperature, width = 7, FUN = mean,
+                                      fill = NA, align = "right"),
+         statistic = "7DADM") 
+
+camp_polk_logger_historical <- cp_logger_full |> 
+  bind_rows(camp_polk_7day_max) |> arrange(date) |> glimpse()
+```
+
+```{r}
+camp_polk_logger_historical |>
+  group_by(year = year(date)) |>
+  summarise(mean_temperature = mean(temperature, na.rm = T),
+            min_temperature  = min(temperature, na.rm = T),
+            max_temperature  = max(temperature, na.rm = T)) |>
+  knitr::kable(digits = 2)
+
+ggplot() +
+  geom_line(data = camp_polk_logger_historical, aes(x = date, y = temperature, color = statistic), alpha = 0.8) +
+  scale_color_manual(values = colors_small) +
+  theme_minimal() +
+  ggtitle("UDWC Camp Polk Logger - d/s Camp Polk Bridge on DBLT property")
+```
+
 ### Historical weather forecasts
 
 Historical NWS weather forecasts were obtained from the [Open-Meteo Historical Forecast API](https://open-meteo.com/en/docs/historical-forecast-api), which archives operational GFS (Global Forecast System) model output — the same underlying model used by NWS to generate official forecasts. While NWS applies additional post-processing (Model Output Statistics and forecaster adjustments) before issuing public forecasts, the raw GFS output accessed through Open-Meteo represents the same meteorological signal and is expected to differ from official NWS values by only 1–3°C on any given day. For the purposes of this analysis, GFS-based forecasts are considered a suitable proxy for NWS forecast inputs given their shared model foundation and the daily temporal resolution of the model.
@@ -520,27 +885,54 @@ one_month_historical <- get_historical_forecast(
 
 glimpse(one_month_historical)
 
-# Full 2020 to present run
-all_historical_forecasts <- get_historical_forecast_range(
+# Historical forecast data from 2019-12-25 onwards (GFS archived model runs)
+historical_forecast_data <- get_historical_forecast_range(
   lat        = 44.390278,
   lon        = -121.406792,
-  start_date = "2020-01-01",
-  end_date   = Sys.Date(),
+  start_date = "2019-01-01",
+  end_date   = Sys.Date()-1,
   lead_days  = c(1, 3, 7),
   save_dir   = "data-raw/historical_forecasts"
-)
+) |>
+  mutate(type = "historical forecast")
+
+# Historical observed weather from 2011-01-01 to 2019-12-24 (ERA5 reanalysis)
+# Uses same variables/schema as forecast data; issue_date and lead_days are NA
+historical_weather_data <- get_historical_weather(
+  lat        = 44.390278,
+  lon        = -121.406792,
+  start_date = "2011-01-01",
+  end_date   = "2018-12-31"
+) |>
+  mutate(type = "historical weather")
+
+all_historical_forecasts <- bind_rows(
+  historical_weather_data,
+  historical_forecast_data
+) |>
+  arrange(variable, valid_date)
 
 usethis::use_data(all_historical_forecasts, overwrite = T)
 
 ```
+```{r echo=FALSE}
+all_historical_forecasts |> 
+  group_by(variable, type) |> 
+  summarise(min_date = min(valid_date, na.rm = T),
+            max_date = max(valid_date, na.rm = T),
+            lead_days = paste0(unique(lead_days), collapse = ", "),
+            n_NA = length(unique(is.na(value))) + length(unique(is.infinite(value)))) |> 
+  knitr::kable()
+
+```
 
 ```{r echo=FALSE}
-plot_data <- whychusInputs::all_historical_forecasts |>
+plot_data <- all_historical_forecasts |>
   mutate(
     month     = month(valid_date, label = TRUE),
     year      = year(valid_date),
-    lead_days = factor(lead_days, levels = c(1, 3, 7),
-                       labels = c("Day 1", "Day 3", "Day 7")),
+    lead_days = factor(lead_days, levels = c(0, 1, 3, 7),
+                       labels = c("Hist. Weather",  "Day 1", "Day 3", "Day 7")),
     variable  = recode(variable,
                        "temperature_2m_max" = "Max air temp (°C)",
                        "temperature_2m_min" = "Min air temp (°C)",
@@ -553,6 +945,7 @@ plot_data <- whychusInputs::all_historical_forecasts |>
 # --- Colors -------------------------------------------------------------
 
 lead_colors <- c(
+  "Hist. Weather" = "darkgreen",
   "Day 1" = "#E24B4A",
   "Day 3" = "#888780",
   "Day 7" = "#378ADD"
@@ -568,8 +961,8 @@ ggplot(plot_data, aes(x = month, y = mean_value,
   scale_color_manual(values = lead_colors, name = "Lead time") +
   scale_y_continuous(expand = expansion(mult = 0.1)) +
   labs(
-    title    = "GFS historical forecast — 44.39°N, 121.41°W",
-    subtitle = "Monthly mean by forecast lead time, 2020–present",
+    title    = "GFS historical forecast and weather — 44.39°N, 121.41°W",
+    subtitle = "Monthly mean by forecast lead time, 2011–present",
     x        = NULL,
     y        = NULL,
     caption  = "Source: Open-Meteo Historical Forecast API (GFS seamless)"
@@ -585,4 +978,47 @@ ggplot(plot_data, aes(x = month, y = mean_value,
     panel.grid.minor = element_blank(),
     panel.spacing    = unit(1.2, "lines")
   )
+```
+
+### Camp Polk - one dataset
+
+Combine OWRD and UDWC datasets into one Camp Polk dataset 
+
+```{r}
+overlap <- inner_join(
+  camp_polk_logger_historical |> 
+    filter(statistic == "max") |> 
+    mutate(date = as.Date(date)),
+  camp_polk_historical |> 
+    filter(statistic == "max") |> 
+    filter(variable == "water temperature (c)") |> 
+    select(date, value),
+  by = "date"
+)
+
+overlap |>
+  mutate(diff = temperature - value) |>
+  summarise(
+    n = n(),
+    mean_diff = mean(diff, na.rm = TRUE),
+    max_diff  = max(abs(diff), na.rm = TRUE),
+    cor       = cor(temperature, value, use = "complete.obs")
+  )
+
+```
+
+```{r}
+camp_polk_temperature_historical <- camp_polk_historical |>
+  filter(variable == "water temperature (c)") |> 
+  select(date, statistic, temperature = value) |>
+  mutate(date = as.POSIXct(date)) |>
+  anti_join(
+    camp_polk_logger_historical |> mutate(date = as.POSIXct(as.Date(date))),
+    by = c("date", "statistic")
+  ) |>
+  bind_rows(camp_polk_logger_historical) |>
+  arrange(date, statistic) |> glimpse()
+
+usethis::use_data(camp_polk_temperature_historical, overwrite = TRUE)
+
 ```

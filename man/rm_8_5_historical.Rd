@@ -8,7 +8,7 @@
 A data frame with columns:
 \describe{
 \item{\code{date}}{POSIXct. Observation date, ranging from 2011 to present.}
-\item{\code{statistic}}{Character. Summary statistic: \code{"mean"}, \code{"median"}, \code{"max"}, \code{"min"}.}
+\item{\code{statistic}}{Character. Summary statistic: \code{"mean"}, \code{"median"}, \code{"max"}, \code{"min"}, \code{7DADM}}
 \item{\code{temperature}}{Numeric. Instream temperature in degrees Celsius.}
 }
 }

@@ -21,7 +21,7 @@ library(stringr)
 library(lubridate)
 library(httr2)
 library(jsonlite)
-library(whychusInputs)
+library(whychusModel)
 ```
 
 ## Camp Polk - in-stream temperature and discharge

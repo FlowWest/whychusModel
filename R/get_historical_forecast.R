@@ -128,6 +128,101 @@ get_historical_forecast <- function(
 }
 
 
+#' Retrieve historical observed weather data
+#'
+#' Pulls actual observed weather data (ERA5 reanalysis) from the Open-Meteo
+#' Archive API for a given location and date range. Returns data in the same
+#' schema as \code{get_historical_forecast} with \code{issue_date = NA} and
+#' \code{lead_days = NA}, since observed weather has no forecast lead time.
+#'
+#' @param lat Numeric. Latitude of target point.
+#' @param lon Numeric. Longitude of target point.
+#' @param start_date Character or Date. Start of date range.
+#' @param end_date Character or Date. End of date range.
+#' @param variables Character vector. Daily variables to retrieve.
+#' @param timezone Character. Timezone. Defaults to "UTC".
+#'
+#' @return A tibble with columns: valid_date, issue_date (NA), lead_days (NA),
+#'   variable, value, units, lat, lon
+#'
+#' @examples
+#' \dontrun{
+#' get_historical_weather(
+#'   lat        = 44.390278,
+#'   lon        = -121.406792,
+#'   start_date = "2011-01-01",
+#'   end_date   = "2019-12-24"
+#' )
+#' }
+#'
+#' @importFrom httr2 request req_url_query req_perform resp_body_json
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr arrange
+#' @importFrom tibble tibble
+#' @export
+get_historical_weather <- function(
+    lat        = 44.390278,
+    lon        = -121.406792,
+    start_date,
+    end_date,
+    variables  = c(
+      "temperature_2m_max",
+      "temperature_2m_min",
+      "cloud_cover_mean"
+    ),
+    timezone   = "UTC"
+) {
+  start <- as.Date(start_date)
+  end   <- as.Date(end_date)
+
+  base_params <- list(
+    latitude   = lat,
+    longitude  = lon,
+    start_date = format(start, "%Y-%m-%d"),
+    end_date   = format(end,   "%Y-%m-%d"),
+    timezone   = timezone
+  )
+  daily_params <- set_names(
+    as.list(variables), rep("daily", length(variables))
+  )
+
+  resp <- tryCatch({
+    request("https://archive-api.open-meteo.com/v1/archive") |>
+      req_url_query(!!!base_params) |>
+      req_url_query(!!!daily_params) |>
+      req_perform() |>
+      resp_body_json()
+  }, error = function(e) {
+    warning("API call failed: ", e$message)
+    return(NULL)
+  })
+
+  if (is.null(resp)) return(tibble())
+
+  units_lookup <- resp$daily_units
+  dates <- as.Date(unlist(resp$daily$time))
+
+  map_dfr(variables, function(v) {
+    vals <- unlist(resp$daily[[v]])
+    if (is.null(vals)) {
+      warning("Variable not found: ", v)
+      return(tibble())
+    }
+    tibble(
+      valid_date = dates,
+      issue_date = as.Date(NA),
+      lead_days  = 0,
+      variable   = v,
+      value      = as.numeric(vals),
+      units      = units_lookup[[v]] %||% NA_character_,
+      lat        = lat,
+      lon        = lon
+    )
+  }) |>
+    arrange(variable, valid_date)
+}
+
+
 #' Pull historical forecasts across a long date range in annual chunks
 #'
 #' @param lat Numeric. Latitude.
@@ -170,7 +265,7 @@ get_historical_forecast_range <- function(
     message("\n=== Year: ", yr, " ===")
     
     result <- tryCatch(
-      get_nws_historical_forecast(
+      get_historical_forecast(
         lat, lon, yr_start, yr_end, lead_days, variables, model
       ),
       error = function(e) {

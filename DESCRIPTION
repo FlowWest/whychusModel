@@ -1,4 +1,4 @@
-Package: whychusInputs
+Package: whychusModel
 Title: Input Data and Parameters for the Whychus Basin Model
 Version: 0.1.0
 Authors@R: 
