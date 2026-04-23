@@ -1,0 +1,736 @@
+---
+title: "Predictor EDA — Whychus Creek Water Temperature"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(GGally)
+library(patchwork)
+library(whychusModel)
+```
+
+# 1. Join and Prepare Data
+
+```{r prepare-data}
+# Pivot forecasts wide — one row per date, columns per variable
+forecasts_wide <- all_historical_forecasts |>
+  filter(lead_days == 1) |>          # use day-1 forecast for EDA
+  select(valid_date, variable, value) |>
+  pivot_wider(names_from = variable, values_from = value) |>
+  rename(
+    date       = valid_date,
+    air_max_c  = temperature_2m_max,
+    air_min_c  = temperature_2m_min,
+    cloud_pct  = cloud_cover_mean
+  )
+
+# Pull observed water temp — max and mean (Camp Polk)
+obs_wide <- camp_polk_historical |>
+  filter(variable == "water temperature (c)") |>
+  filter(statistic %in% c("max", "mean")) |>
+  select(date, statistic, value) |>
+  pivot_wider(names_from = statistic, values_from = value) |>
+  rename(twater_max = max, twater_mean = mean)
+
+# Pull observed flow (Camp Polk)
+obs_flow <- camp_polk_historical |>
+  filter(variable == "discharge (cfs)") |>
+  select(date, Q = value)
+
+# Join everything
+df <- obs_wide |>
+  left_join(forecasts_wide, by = "date") |>
+  left_join(obs_flow,       by = "date") |>
+  mutate(
+    year      = year(date),
+    month     = month(date),
+    julian    = yday(date),
+    month_lab = month(date, label = TRUE)
+  ) |>
+  filter(month >= 5, month <= 9) |>   # May–September only
+  arrange(date)
+
+# Add lag variables (previous day)
+df <- df |>
+  mutate(
+    Q_lag1       = lag(Q,         1),
+    air_max_lag1 = lag(air_max_c, 1),
+    air_min_lag1 = lag(air_min_c, 1),
+    twater_lag1  = lag(twater_max, 1)
+  )
+
+cat("Rows available for modeling:", nrow(drop_na(df)), "\n")
+glimpse(df)
+```
+
+# 2. Annual Trends — Has Temperature Been Changing Over Time?
+
+```{r annual-trends}
+p_annual <- df |>
+  group_by(year) |>
+  summarise(
+    mean_tmax  = mean(twater_max,  na.rm = TRUE),
+    mean_tmean = mean(twater_mean, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(c(mean_tmax, mean_tmean), names_to = "stat", values_to = "temp") |>
+  mutate(stat = recode(stat,
+                       mean_tmax  = "Max water temp",
+                       mean_tmean = "Mean water temp"
+  )) |>
+  ggplot(aes(x = year, y = temp, color = stat)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Max water temp"  = "#9A8822",
+                                "Mean water temp" = "#F5CDB4")) +
+  labs(title = "Annual mean water temperature at Camp Polk (May–Sep)",
+       x = NULL, y = "°C", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+
+print(p_annual)
+```
+
+# 3. Seasonal Pattern — How Does Temperature Vary Through the Season?
+
+```{r seasonal-pattern}
+p_seasonal <- df |>
+  group_by(julian) |>
+  summarise(
+    mean_tmax = mean(twater_max, na.rm = TRUE),
+    sd_tmax   = sd(twater_max,   na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = julian)) +
+  geom_ribbon(aes(ymin = mean_tmax - sd_tmax,
+                  ymax = mean_tmax + sd_tmax),
+              fill = "#74A089", alpha = 0.15) +
+  geom_line(aes(y = mean_tmax), color = "#74A089", linewidth = 1) +
+  labs(title = "Seasonal water temperature pattern at Camp Polk (mean ± 1 SD)",
+       x = "Julian day", y = "Max water temp (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+print(p_seasonal)
+```
+
+# 4. Scatterplots — Water Temp vs Each Predictor
+
+```{r scatterplots, fig.height=8}
+scatter_vars   <- c("air_max_c", "air_min_c", "cloud_pct", "Q", "julian")
+scatter_labels <- c("Air max (°C)", "Air min (°C)", "Cloud cover (%)",
+                    "Flow (Q)", "Julian day")
+
+plots <- map2(scatter_vars, scatter_labels, function(var, lab) {
+  ggplot(df, aes(x = .data[[var]], y = twater_max, color = month_lab)) +
+    geom_point(alpha = 0.3, size = 0.8) +
+    geom_smooth(method = "lm", se = FALSE, color = "black",
+                linewidth = 0.8, linetype = "dashed") +
+    scale_color_viridis_d(option = "C", name = "Month") +
+    labs(x = lab, y = "Tmax water (°C)") +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "none", panel.grid.minor = element_blank())
+})
+
+wrap_plots(plots, ncol = 3) +
+  plot_annotation(title = "Water temperature vs predictors — Camp Polk (May–Sep)")
+```
+
+# 5. Lag Effect — Does Yesterday's Temperature Matter?
+
+```{r lag-effect}
+p_lag <- df |>
+  filter(!is.na(twater_lag1)) |>
+  ggplot(aes(x = twater_lag1, y = twater_max)) +
+  geom_point(alpha = 0.25, color = "#185FA5", size = 0.8) +
+  geom_smooth(method = "lm", color = "#E24B4A", se = TRUE, linewidth = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              color = "grey50", linewidth = 0.6) +
+  labs(
+    title    = "Lag effect — yesterday vs today water temperature (Camp Polk)",
+    subtitle = "Dashed = 1:1 line",
+    x = "Yesterday Tmax (°C)", y = "Today Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+print(p_lag)
+```
+
+# 6. Correlation Table — Quick Numeric Summary
+
+```{r correlation-table}
+cor_vars <- df |>
+  select(twater_max, twater_mean, air_max_c, air_min_c,
+         cloud_pct, Q, julian, twater_lag1, air_max_lag1) |>
+  drop_na()
+
+cor_matrix <- cor(cor_vars, use = "complete.obs") |>
+  as.data.frame() |>
+  rownames_to_column("variable") |>
+  select(variable, twater_max, twater_mean) |>
+  arrange(desc(abs(twater_max)))
+
+cat("\n--- Correlations with water temperature (Camp Polk) ---\n")
+print(cor_matrix)
+```
+
+# 7. Exceedance — How Often Does Tmax Exceed Key Thresholds?
+
+```{r exceedance}
+thresholds <- c(18, 20, 24)
+
+exceedance <- map_dfr(thresholds, function(thresh) {
+  df |>
+    group_by(month_lab) |>
+    summarise(
+      pct_exceed = mean(twater_max >= thresh, na.rm = TRUE) * 100,
+      .groups = "drop"
+    ) |>
+    mutate(threshold = paste0(thresh, "°C"))
+})
+
+p_exceed <- ggplot(exceedance,
+                   aes(x = month_lab, y = pct_exceed,
+                       color = threshold, group = threshold)) +
+  geom_line(linewidth = 0.9, alpha = 0.6) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c("18°C" = "#EF9F27", "20°C" = "#E24B4A", "24°C" = "#791F1F"),
+    name = "Threshold"
+  ) +
+  labs(
+    title = "Frequency of temperature exceedance by month — Camp Polk",
+    x = NULL, y = "% of days exceeding threshold"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+
+print(p_exceed)
+```
+
+# 8. RM 8.5 Overview
+
+```{r rm85-prep}
+# Prepare RM 8.5 — May–September, max statistic
+rm85 <- rm_8_5_historical |>
+  mutate(
+    date      = as.Date(date),
+    year      = year(date),
+    month     = month(date),
+    julian    = yday(date),
+    month_lab = month(date, label = TRUE)
+  ) |>
+  filter(month >= 5, month <= 9)
+
+rm85_max <- rm85 |> filter(statistic == "max")
+```
+
+## 8a. Annual Trends at RM 8.5
+
+```{r rm85-annual}
+rm85 |>
+  filter(statistic %in% c("max", "mean")) |>
+  group_by(year, statistic) |>
+  summarise(avg_temp = mean(temperature, na.rm = TRUE), .groups = "drop") |>
+  mutate(statistic = recode(statistic, max = "Max", mean = "Mean")) |>
+  ggplot(aes(x = year, y = avg_temp, color = statistic)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c(Max = "#9A8822", Mean = "#F5CDB4")) +
+  labs(title = "Annual mean water temperature at RM 8.5 (May–Sep)",
+       x = NULL, y = "°C", color = "Statistic") +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+## 8b. Seasonal Pattern at RM 8.5
+
+```{r rm85-seasonal}
+rm85_max |>
+  group_by(julian) |>
+  summarise(
+    mean_tmax = mean(temperature, na.rm = TRUE),
+    sd_tmax   = sd(temperature,   na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = julian)) +
+  geom_ribbon(aes(ymin = mean_tmax - sd_tmax,
+                  ymax = mean_tmax + sd_tmax),
+              fill = "#D2848A", alpha = 0.2) +
+  geom_line(aes(y = mean_tmax), color = "#D2848A", linewidth = 1) +
+  labs(title = "Seasonal water temperature pattern at RM 8.5 (mean ± 1 SD)",
+       x = "Julian day", y = "Max water temp (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 8c. Exceedance at RM 8.5
+
+```{r rm85-exceedance}
+map_dfr(c(18, 20, 24), function(thresh) {
+  rm85_max |>
+    group_by(month_lab) |>
+    summarise(
+      pct_exceed = mean(temperature >= thresh, na.rm = TRUE) * 100,
+      .groups = "drop"
+    ) |>
+    mutate(threshold = paste0(thresh, "°C"))
+}) |>
+  ggplot(aes(x = month_lab, y = pct_exceed, color = threshold, group = threshold)) +
+  geom_line(linewidth = 0.9, alpha = 0.6) +
+  geom_point(size = 2) +
+  scale_color_manual(
+    values = c("18°C" = "#EF9F27", "20°C" = "#E24B4A", "24°C" = "#791F1F"),
+    name = "Threshold"
+  ) +
+  labs(title = "Frequency of temperature exceedance by month — RM 8.5",
+       x = NULL, y = "% of days exceeding threshold") +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+# 9. RM 8.5 vs RM 6 Temperature Relationship
+
+```{r rm6-prep}
+# Prepare RM 6 — May–September, max statistic
+rm6_max <- rm_6_historical |>
+  mutate(
+    date      = as.Date(date),
+    year      = year(date),
+    month     = month(date),
+    month_lab = month(date, label = TRUE)
+  ) |>
+  filter(month >= 5, month <= 9, statistic == "max")
+```
+
+```{r rm85-vs-rm6}
+# Join RM 8.5 and RM 6 on date
+rm_joint <- rm85_max |>
+  select(date, month_lab, temp_rm85 = temperature) |>
+  inner_join(
+    rm6_max |> select(date, temp_rm6 = temperature),
+    by = "date"
+  ) |>
+  drop_na()
+
+cat("Paired days (RM 8.5 & RM 6):", nrow(rm_joint), "\n")
+
+# Correlation
+r_val <- cor(rm_joint$temp_rm85, rm_joint$temp_rm6, use = "complete.obs")
+cat(sprintf("Pearson r (RM 8.5 vs RM 6 Tmax): %.3f\n", r_val))
+```
+
+## 9a. Scatter: RM 8.5 vs RM 6 Daily Max Temperature
+
+```{r rm85-rm6-scatter}
+lm_fit <- lm(temp_rm85 ~ temp_rm6, data = rm_joint)
+
+ggplot(rm_joint, aes(x = temp_rm6, y = temp_rm85, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.9, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "grey60",
+              linewidth = 0.6, linetype = "dotted") +
+  scale_color_viridis_d(option = "C", name = "Month") +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f  |  slope = %.2f  |  intercept = %.2f",
+                           r_val, coef(lm_fit)[2], coef(lm_fit)[1]),
+           size = 3.5, color = "grey30") +
+  labs(
+    title    = "RM 8.5 vs RM 6 — daily max water temperature (May–Sep)",
+    subtitle = "Dotted = 1:1 line; dashed = OLS fit",
+    x = "RM 6 Tmax (°C)", y = "RM 8.5 Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 9b. Difference (RM 8.5 − RM 6) Through the Season
+
+```{r rm85-rm6-diff}
+rm_joint |>
+  mutate(
+    diff      = temp_rm85 - temp_rm6,
+    julian    = yday(date)
+  ) |>
+  ggplot(aes(x = julian, y = diff)) +
+  geom_hline(yintercept = 0, color = "grey60", linetype = "dashed") +
+  geom_point(aes(color = month_lab), alpha = 0.3, size = 0.9) +
+  geom_smooth(method = "loess", span = 0.4, se = TRUE,
+              color = "#D2848A", fill = "#D2848A", alpha = 0.15,
+              linewidth = 1) +
+  scale_color_viridis_d(option = "C", name = "Month") +
+  labs(
+    title    = "Temperature difference (RM 8.5 − RM 6) across the season",
+    subtitle = "Positive = RM 8.5 warmer than RM 6",
+    x = "Julian day", y = "Tmax difference (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 9c. Difference by Month
+
+```{r rm85-rm6-boxplot}
+rm_joint |>
+  mutate(diff = temp_rm85 - temp_rm6) |>
+  ggplot(aes(x = month_lab, y = diff, fill = month_lab)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.8, show.legend = FALSE) +
+  geom_hline(yintercept = 0, color = "grey40", linetype = "dashed") +
+  scale_fill_viridis_d(option = "C") +
+  labs(
+    title = "RM 8.5 − RM 6 temperature difference by month",
+    x = NULL, y = "Tmax difference (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+# 10. RM 6 Temperature vs Camp Polk Flow
+
+```{r rm6-flow-prep}
+# Join RM 6 max temp with Camp Polk discharge
+rm6_flow <- rm6_max |>
+  select(date, month_lab, temp_rm6 = temperature) |>
+  inner_join(
+    obs_flow |> mutate(date = as.Date(date)),
+    by = "date"
+  ) |>
+  drop_na()
+
+cat("Paired days (RM 6 temp & Camp Polk flow):", nrow(rm6_flow), "\n")
+
+r_flow <- cor(rm6_flow$temp_rm6, rm6_flow$Q, use = "complete.obs")
+cat(sprintf("Pearson r (RM 6 Tmax vs Camp Polk Q): %.3f\n", r_flow))
+```
+
+## 10a. Scatter: RM 6 Temperature vs Camp Polk Flow
+
+```{r rm6-flow-scatter}
+ggplot(rm6_flow, aes(x = Q, y = temp_rm6, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.9, linetype = "dashed") +
+  scale_color_viridis_d(option = "D", name = "Month") +
+  scale_x_log10(labels = scales::comma) +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f", r_flow),
+           size = 3.5, color = "grey30") +
+  labs(
+    title    = "RM 6 Tmax vs Camp Polk flow (May–Sep)",
+    subtitle = "x-axis on log scale",
+    x = "Camp Polk discharge (cfs, log scale)", y = "RM 6 Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 10b. RM 6 Temperature vs Flow — by Month
+
+```{r rm6-flow-facet, fig.height=7}
+ggplot(rm6_flow, aes(x = Q, y = temp_rm6)) +
+  geom_point(alpha = 0.3, size = 0.9, color = "#74A089") +
+  geom_smooth(method = "lm", se = TRUE, color = "#185FA5",
+              linewidth = 0.8, linetype = "dashed") +
+  scale_x_log10(labels = scales::comma) +
+  facet_wrap(~month_lab, scales = "free_x") +
+  labs(
+    title = "RM 6 Tmax vs Camp Polk flow — faceted by month",
+    x = "Camp Polk discharge (cfs, log scale)", y = "RM 6 Tmax (°C)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 10c. Flow Quantile Bins vs RM 6 Temperature
+
+```{r rm6-flow-quantile}
+rm6_flow |>
+  mutate(
+    Q_bin = cut(Q,
+                breaks = quantile(Q, probs = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+                                  na.rm = TRUE),
+                labels = c("Q1\n(lowest)", "Q2", "Q3", "Q4", "Q5\n(highest)"),
+                include.lowest = TRUE)
+  ) |>
+  ggplot(aes(x = Q_bin, y = temp_rm6, fill = Q_bin)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.8, show.legend = FALSE) +
+  scale_fill_viridis_d(option = "D") +
+  labs(
+    title    = "RM 6 Tmax by Camp Polk flow quintile (May–Sep)",
+    subtitle = "Higher flow generally associated with cooler temperatures",
+    x = "Flow quintile (Camp Polk)", y = "RM 6 Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+# 11. Whychus Nr Sisters & Whychus At Sisters
+
+## 11a. Data Availability and Camp Polk Gap Coverage
+
+```{r sisters-prep}
+# Max daily water temperature (May–Sep)
+cp_temp_gage <- camp_polk_historical |>
+  filter(variable == "water temperature (c)", statistic == "max",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, cp_temp = value)
+
+nr_temp_gage <- whychus_nr_sisters_historical |>
+  filter(variable == "water temperature (c)", statistic == "max",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, nr_temp = value)
+
+# Mean daily flow (May–Sep)
+cp_flow_gage <- camp_polk_historical |>
+  filter(variable == "discharge (cfs)", statistic == "mean",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, cp_flow = value)
+
+nr_flow_gage <- whychus_nr_sisters_historical |>
+  filter(variable == "discharge (cfs)", statistic == "mean",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, nr_flow = value)
+
+at_flow_gage <- whychus_at_sisters_historical |>
+  filter(variable == "discharge (cfs)", statistic == "mean",
+         month(date) >= 5, month(date) <= 9) |>
+  select(date, at_flow = value)
+
+# Full join: all May–Sep dates where any gage has a record
+gap_df <- cp_temp_gage |>
+  full_join(nr_temp_gage,  by = "date") |>
+  full_join(cp_flow_gage,  by = "date") |>
+  full_join(nr_flow_gage,  by = "date") |>
+  full_join(at_flow_gage,  by = "date") |>
+  arrange(date)
+
+ggplot() +
+  geom_line(data = gap_df, aes(x = date, y = cp_flow, color = "camp polk")) + 
+  geom_line(data = gap_df, aes(x = date, y = nr_flow, color = "whychus near sisters")) + 
+  geom_line(data = gap_df, aes(x = date, y = at_flow, color = "whychus at sisters")) +
+  theme_minimal() + 
+  ylab("flow (cfs)")
+
+# Availability summary
+avail_summary <- tibble(
+  Gage     = c("Camp Polk — Temp", "Nr Sisters — Temp",
+               "Camp Polk — Flow", "Nr Sisters — Flow", "At Sisters — Flow"),
+  N_days   = c(sum(!is.na(gap_df$cp_temp)), sum(!is.na(gap_df$nr_temp)),
+               sum(!is.na(gap_df$cp_flow)), sum(!is.na(gap_df$nr_flow)),
+               sum(!is.na(gap_df$at_flow))),
+  Date_min = c(min(gap_df$date[!is.na(gap_df$cp_temp)]),
+               min(gap_df$date[!is.na(gap_df$nr_temp)]),
+               min(gap_df$date[!is.na(gap_df$cp_flow)]),
+               min(gap_df$date[!is.na(gap_df$nr_flow)]),
+               min(gap_df$date[!is.na(gap_df$at_flow)])),
+  Date_max = c(max(gap_df$date[!is.na(gap_df$cp_temp)]),
+               max(gap_df$date[!is.na(gap_df$nr_temp)]),
+               max(gap_df$date[!is.na(gap_df$cp_flow)]),
+               max(gap_df$date[!is.na(gap_df$nr_flow)]),
+               max(gap_df$date[!is.na(gap_df$at_flow)]))
+)
+
+cat("--- Data availability by gage (May–Sep) ---\n")
+print(avail_summary)
+```
+
+```{r sisters-gap-analysis}
+# When Camp Polk temperature is missing, do the other gages have data?
+cp_offline <- gap_df |>
+  filter(is.na(cp_temp)) |>
+  mutate(
+    nr_temp_avail = !is.na(nr_temp)
+  )
+
+cat(sprintf("Days with Camp Polk temp missing (May–Sep): %d\n", nrow(cp_offline)))
+cat(sprintf("  Nr Sisters temp available: %d (%.0f%%)\n",
+            sum(cp_offline$nr_temp_avail),
+            100 * mean(cp_offline$nr_temp_avail)))
+```
+
+```{r}
+gap_df |>
+  select(date,
+         `Camp Polk Temp`  = cp_temp,
+         `Nr Sisters Temp` = nr_temp,
+         `Camp Polk Flow`  = cp_flow,
+         `Nr Sisters Flow` = nr_flow,
+         `At Sisters Flow` = at_flow) |>
+  pivot_longer(-date, names_to = "gage", values_to = "value") |>
+  mutate(
+    has_data      = !is.na(value),
+    year          = factor(year(date)),
+    month         = month(date, label = TRUE, abbr = TRUE),
+    days_in_month = days_in_month(date),
+    type          = if_else(str_detect(gage, "Temp"), "Temperature", "Flow"),
+    gage          = factor(gage, levels = c("Camp Polk Temp", "Nr Sisters Temp",
+                                            "At Sisters Flow", "Nr Sisters Flow",
+                                            "Camp Polk Flow"))
+  ) |>
+  group_by(type, year, month, gage) |>
+  summarise(
+    days_present  = sum(has_data),
+    days_in_month = first(days_in_month),
+    pct_present   = days_present / days_in_month,
+    .groups = "drop"
+  ) |>
+  mutate(
+    coverage = cut(pct_present,
+                   breaks = c(-Inf, 0, 0.25, 0.5, 0.75, 1),
+                   labels = c("No data", "1–25%", "26–50%", "51–75%", "76–100%"),
+                   include.lowest = TRUE)
+  ) |>
+  ggplot(aes(x = month, y = gage, fill = coverage)) +
+  geom_tile(height = 0.8, color = "white", linewidth = 0.4) +
+  scale_fill_manual(
+    values = c(
+      "No data"  = "#D9D9D9",
+      "1–25%"    = "#E8A598",
+      "26–50%"   = "#F0C27F",
+      "51–75%"   = "#A8C5A0",
+      "76–100%"  = "#4E8B6F"
+    ),
+    name = "Days with data",
+    drop = FALSE
+  ) +
+  facet_grid(year ~ type, switch = "y") +
+  labs(x = NULL, y = NULL,
+       title = "Data availability by gage and year") +
+  theme_minimal(base_size = 9) +
+  theme(
+    legend.position  = "bottom",
+    legend.key.width = unit(0.8, "cm"),
+    panel.grid       = element_blank(),
+    axis.text.x      = element_text(size = 8),
+    axis.text.y      = element_text(size = 8),
+    strip.text.x     = element_text(size = 10, face = "plain"),
+    strip.text.y     = element_text(size = 8),
+    strip.placement  = "outside",
+    panel.spacing    = unit(0.3, "lines")
+  )
+```
+
+## 11b. Nr Sisters Temperature vs Camp Polk Temperature
+
+```{r sisters-temp-scatter}
+temp_joint <- cp_temp_gage |>
+  inner_join(nr_temp_gage, by = "date") |>
+  mutate(month_lab = month(date, label = TRUE)) |>
+  drop_na()
+
+cat(sprintf("Paired days (Camp Polk & Nr Sisters temp): %d\n", nrow(temp_joint)))
+r_temp  <- cor(temp_joint$cp_temp, temp_joint$nr_temp, use = "complete.obs")
+lm_temp <- lm(cp_temp ~ nr_temp, data = temp_joint)
+cat(sprintf("Pearson r: %.3f  |  slope: %.2f  |  intercept: %.2f\n",
+            r_temp, coef(lm_temp)[2], coef(lm_temp)[1]))
+
+ggplot(temp_joint, aes(x = nr_temp, y = cp_temp, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.9, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "grey60",
+              linewidth = 0.6, linetype = "dotted") +
+  scale_color_viridis_d(option = "C", name = "Month") +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f  |  slope = %.2f  |  intercept = %.2f",
+                           r_temp, coef(lm_temp)[2], coef(lm_temp)[1]),
+           size = 3.5, color = "grey30") +
+  labs(
+    title    = "Nr Sisters vs Camp Polk — daily max water temperature (May–Sep)",
+    subtitle = "Dotted = 1:1 line; dashed = OLS fit",
+    x = "Nr Sisters Tmax (°C)", y = "Camp Polk Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+```{r sisters-temp-diff, fig.height=4}
+temp_joint |>
+  mutate(diff = cp_temp - nr_temp) |>
+  ggplot(aes(x = yday(date), y = diff, color = month_lab)) +
+  geom_hline(yintercept = 0, color = "grey60", linetype = "dashed") +
+  geom_point(alpha = 0.3, size = 0.9) +
+  geom_smooth(method = "loess", span = 0.4, se = TRUE,
+              color = "#185FA5", fill = "#185FA5", alpha = 0.15, linewidth = 1) +
+  scale_color_viridis_d(option = "C", name = "Month") +
+  labs(
+    title    = "Temperature difference (Camp Polk − Nr Sisters) across the season",
+    subtitle = "Positive = Camp Polk warmer than Nr Sisters",
+    x = "Julian day", y = "Tmax difference (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 11c. Flow Relationships — Nr Sisters and At Sisters vs Camp Polk
+
+```{r sisters-flow-flow-scatter, fig.height=5}
+# Nr Sisters flow vs Camp Polk flow
+nr_cp_flow <- cp_flow_gage |>
+  inner_join(nr_flow_gage, by = "date") |>
+  mutate(month_lab = month(date, label = TRUE)) |>
+  drop_na()
+
+# At Sisters flow vs Camp Polk flow
+at_cp_flow <- cp_flow_gage |>
+  inner_join(at_flow_gage, by = "date") |>
+  mutate(month_lab = month(date, label = TRUE)) |>
+  drop_na()
+
+r_nr_cp <- cor(nr_cp_flow$cp_flow, nr_cp_flow$nr_flow, use = "complete.obs")
+r_at_cp <- cor(at_cp_flow$cp_flow, at_cp_flow$at_flow, use = "complete.obs")
+
+cat(sprintf("Paired days (Nr Sisters & Camp Polk flow): %d  |  r = %.3f\n",
+            nrow(nr_cp_flow), r_nr_cp))
+cat(sprintf("Paired days (At Sisters & Camp Polk flow): %d  |  r = %.3f\n",
+            nrow(at_cp_flow), r_at_cp))
+
+p_nr_flow <- ggplot(nr_cp_flow, aes(x = nr_flow, y = cp_flow, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.1) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.8, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "grey60",
+              linewidth = 0.6, linetype = "dotted") +
+  scale_color_viridis_d(option = "D", name = "Month") +
+  scale_x_log10(labels = scales::comma) +
+  scale_y_log10(labels = scales::comma) +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f", r_nr_cp), size = 3.5, color = "grey30") +
+  labs(x = "Nr Sisters flow (cfs, log)", y = "Camp Polk flow (cfs, log)",
+       title = "Nr Sisters vs Camp Polk flow") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+p_at_flow <- ggplot(at_cp_flow, aes(x = at_flow, y = cp_flow, color = month_lab)) +
+  geom_point(alpha = 0.35, size = 1.1) +
+  geom_smooth(method = "lm", se = TRUE, color = "black",
+              linewidth = 0.8, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, color = "grey60",
+              linewidth = 0.6, linetype = "dotted") +
+  scale_color_viridis_d(option = "D", name = "Month") +
+  scale_x_log10(labels = scales::comma) +
+  scale_y_log10(labels = scales::comma) +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.4,
+           label = sprintf("r = %.3f", r_at_cp), size = 3.5, color = "grey30") +
+  labs(x = "At Sisters flow (cfs, log)", y = "Camp Polk flow (cfs, log)",
+       title = "At Sisters vs Camp Polk flow") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank())
+
+(p_nr_flow | p_at_flow) +
+  plot_annotation(title = "Flow relationships — upstream gages vs Camp Polk (May–Sep)",
+                  subtitle = "Both axes log scale; dotted = 1:1 line")
+```

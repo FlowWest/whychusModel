@@ -1,0 +1,248 @@
+---
+title: "Pull Real-Time Data"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(httr)
+library(rvest)
+library(xml2)
+library(readr)
+library(janitor)
+library(stringr)
+library(lubridate)
+library(httr2)
+library(jsonlite)
+library(whychusModel)
+```
+
+## Camp Polk - in-stream temperature and discharge
+
+OWRD station ID 14076100:
+<https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14076100>
+
+```{r}
+# instantaneous flow
+flow_daily_raw <- get_owrd_hydro(
+  station_nbr = "14076100",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "Instantaneous_Flow"
+)
+
+# instantaneous water temperature
+temp_daily_raw <- get_owrd_hydro(
+  station_nbr = "14076100",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "WTEMP15"
+) 
+
+temperature <- temp_daily_raw |> 
+  rename(date = record_date, 
+         temp_c = instantaneous_water_temp_c) |> 
+  mutate(date = mdy_hm(date),
+         download_date = mdy_hm(download_date)) |> 
+  mutate(station_name = "Camp Polk (OWRD)") |> 
+  glimpse()
+
+flow <- flow_daily_raw |> 
+  rename(date = record_date, 
+         flow_cfs = instananteous_flow_cfs) |> 
+  mutate(date = mdy_hm(date)) |> 
+  mutate(station_name = "Camp Polk (OWRD)") |> 
+  glimpse()
+
+```
+
+```{r}
+ggplot(data = temperature, 
+       aes(x = date, y = temp_c)) + 
+  geom_line() +
+  theme_minimal()
+
+ggplot(data = flow, 
+       aes(x = date, y = flow_cfs)) + 
+  geom_line() +
+  theme_minimal()
+
+```
+
+## Whychus Cr at Sisters, OR - flow
+
+This site is in Sisters
+
+OWRD station ID 14076050:
+<https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14076050>
+
+```{r}
+# instantaneous flow
+flow_daily_raw_sisters <- get_owrd_hydro(
+  station_nbr = "14076050",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "Instantaneous_Flow"
+)
+
+flow_sisters <- flow_daily_raw_sisters |> 
+  rename(date = record_date, 
+         flow_cfs = instananteous_flow_cfs) |> 
+  mutate(date = mdy_hm(date)) |> 
+  mutate(station_name = "Whychus Cr at Sisters, OR (OWRD)") |> 
+  glimpse()
+
+ggplot(data = flow_sisters, 
+       aes(x = date, y = flow_cfs)) + 
+  geom_line() +
+  theme_minimal()
+```
+
+## Whychus Cr NR Sisters, OR - flow and temperature
+
+This site is upstream from sisters but includes Temperature and Flow
+
+OWRD station ID 14075000:
+<https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/display_hydro_graph.aspx?station_nbr=14075000>
+
+```{r}
+# instantaneous flow
+flow_daily_raw_nr_sisters <- get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "Instantaneous_Flow"
+)
+
+flow_nr_sisters <- flow_daily_raw_nr_sisters |> 
+  rename(date = record_date, 
+         flow_cfs = instananteous_flow_cfs) |> 
+  mutate(date = mdy_hm(date)) |> 
+  mutate(station_name = "Whychus Cr NR Sisters, OR (OWRD)") |> 
+  glimpse()
+
+ggplot(data = flow_nr_sisters, 
+       aes(x = date, y = flow_cfs)) + 
+  geom_line() +
+  theme_minimal()
+
+# instantaneous water temperature
+temp_daily_raw_nr_sisters <- get_owrd_hydro(
+  station_nbr = "14075000",
+  start_date = Sys.Date()-100,
+  end_date = Sys.Date()-1,
+  data_source = "WTEMP15"
+) 
+
+temperature_nr_sisters <- temp_daily_raw |> 
+  rename(date = record_date, 
+         temp_c = instantaneous_water_temp_c) |> 
+  mutate(date = mdy_hm(date),
+         download_date = mdy_hm(download_date)) |> 
+  mutate(station_name = "Whychus Cr NR Sisters, OR (OWRD)") |> 
+  glimpse()
+
+ggplot(data = temperature_nr_sisters, 
+       aes(x = date, y = temp_c)) + 
+  geom_line() +
+  theme_minimal()
+```
+
+
+## NWS Forecasts
+
+<https://weather-gov.github.io/api/gridpoints#>:\~:text=What's%20a%20gridpoint%3F,of%20these%202.5km%20squares
+
+Data options:
+
+-   temperature: Air temperature
+
+-   dewpoint: Dewpoint temperature
+
+-   maxTemperature: High temperature
+
+-   minTemperature: Low temperature
+
+-   relativeHumidity: Relative humidity
+
+-   apparentTemperature: Apparent temperature (heat index or wind chill)
+
+-   heatIndex: Heat index. This is the apparentTemperature data with
+values filtered out that are below the threshold of the heat index
+calculation.
+
+-   windChill: Wind chill. This is the apparentTemperature data with
+values filtered out that are above the threshold of the wind chill
+calculation.
+
+-   skyCover: Percentage of sky with cloud cover
+
+-   windDirection: Direction of prevailing wind
+
+-   windSpeed: Maximum prevailing wind speed
+
+-   windGust: Maximum wind gust
+
+RM 8.5 data logger location: 44.390278, -121.406792
+
+```{r}
+# find the grid by running this: 
+# link <- "https://api.weather.gov/points/44.390278,-121.406792"
+# grid <- request(link) |>
+#   req_perform() |>
+#   resp_body_json()
+# grid$properties$forecastGridData
+
+# to get forecast: 
+# link_met <- "https://api.weather.gov/gridpoints/PDT/35,57"
+
+air_temp <- get_nws_forecast("PDT/35,57", "temperature")
+min_air_temp <- get_nws_forecast("PDT/35,57", "minTemperature")
+max_air_temp <- get_nws_forecast("PDT/35,57", "maxTemperature")
+sky_cover <- get_nws_forecast("PDT/35,57", "skyCover")
+
+```
+
+```{r}
+
+ggplot(air_temp, aes(x = datetime, y = air_temperature_c)) + 
+  geom_line() +
+  geom_point(data = min_air_temp, aes(x = datetime, y = min_air_temp_c, color = "min")) + 
+  geom_point(data = max_air_temp, aes(x = datetime, y = max_air_temp_c, color = "max")) + 
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(sky_cover, aes(x = datetime, y = sky_cover_perc)) + 
+  geom_line() +
+  theme_minimal()
+
+```
+
+## OpenMeteo weather forecasts and historical weather 
+
+TODO: compare to NWS
+
+## Past Weather Forecasts
+
+What gfs_seamless actually is:
+GFS (Global Forecast System) is the same underlying model that NWS uses operationally, so the forecast values will be very similar. However there are a few caveats:
+
+Spatial downscaling — Open-Meteo applies statistical downscaling to the raw GFS output. The raw GFS grid is ~25km resolution; Open-Meteo interpolates to your exact point and may apply terrain corrections. NWS does its own post-processing (MOS — Model Output Statistics) to produce the official forecast you'd see on weather.gov.
+NWS = GFS + post-processing — what NWS actually issues publicly is not raw GFS. It goes through MOS bias correction and human forecaster adjustments, particularly for temperature. So the official NWS forecast for your point could differ from raw GFS by 1–3°C on any given day.
+gfs_seamless blends models — it stitches together GFS with ECMWF for longer lead times, so at day 7 you may not be getting pure GFS at all.
+
+What this means practically:
+SourceWhat it isgfs_seamless via Open-MeteoRaw GFS, downscaled, possibly blendedOfficial NWS forecast (weather.gov)GFS + MOS + human adjustment
+
+```{r}
+
+```

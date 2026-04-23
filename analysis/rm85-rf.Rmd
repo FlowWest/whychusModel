@@ -1,0 +1,828 @@
+---
+title: "Random Forest — Instream Temperature at RM 8.5 (1–7 Day Forecasts)"
+date: "`r Sys.Date()`"
+author: "Maddee Wiggins"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(randomForest)
+library(whychusModel)
+```
+
+# Configuration
+
+```{r config}
+month_start   <- 5      # May
+month_end     <- 9      # September
+lead_days_vec <- c(1, 3, 7)   # forecast horizons to model
+
+ntree <- 500            # number of trees
+p     <- 0.2            # test proportion (fraction held out)
+mtry  <- NULL           # NULL = default floor(p/3)
+
+output_dir <- here::here("output")
+```
+
+# 1. Load Data
+
+## 1a. RM 8.5 daily max temperature
+
+```{r rm85-tmax}
+rm85_tmax <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "max") |>
+  select(date, rm_8_5_tmax = temperature)
+```
+
+## 1b. RM 8.5 7-day average daily maximum (7DADM)
+
+```{r rm85-7dadm}
+rm85_7dadm <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, rm_8_5_7dadm = temperature)
+```
+
+## 1c. Camp Polk temperature
+
+```{r camp-polk-temp}
+cp_temp <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "max") |>
+  select(date, cp_tmax = temperature)
+
+cp_7dadm <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, cp_7dadm = temperature)
+```
+
+## 1d. Camp Polk flow
+
+```{r camp-polk-flow}
+cp_flow <- camp_polk_flow_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "mean") |>
+  select(date, cp_flow_mean = flow_cfs)
+```
+
+# 2. Helper Functions
+
+```{r helpers}
+get_forecast <- function(lead_k) {
+  fcst <- all_historical_forecasts |>
+    filter(lead_days == lead_k) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date,
+           air_max   = temperature_2m_max,
+           air_min   = temperature_2m_min,
+           cloud_pct = cloud_cover_mean)
+
+  obs <- all_historical_forecasts |>
+    filter(lead_days == 0) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date,
+           air_max   = temperature_2m_max,
+           air_min   = temperature_2m_min,
+           cloud_pct = cloud_cover_mean)
+
+  bind_rows(fcst, obs) |>
+    distinct(date, .keep_all = TRUE)
+}
+
+build_df <- function(lead_k, target_tbl = rm85_tmax, target_col = "rm_8_5_tmax",
+                     cp_temp_tbl = cp_temp, cp_temp_col = "cp_tmax") {
+  fcst_k <- get_forecast(lead_k)
+
+  target_tbl |>
+    left_join(cp_flow,     by = "date") |>
+    left_join(cp_temp_tbl, by = "date") |>
+    left_join(fcst_k,      by = "date") |>
+    mutate(
+      month  = month(date),
+      Julian = yday(date),
+      year   = year(date)
+    ) |>
+    filter(month >= month_start, month <= month_end) |>
+    filter(!is.na(.data[[target_col]]), !is.na(cp_flow_mean),
+           !is.na(air_max), !is.na(.data[[cp_temp_col]])) |>
+    drop_na() |>
+    distinct(date, .keep_all = TRUE) |>
+    arrange(date)
+}
+
+fit_rf <- function(X, tar, dates, ntree = 500, mtry = NULL, p = 0.2, seed = 42) {
+  X  <- as.data.frame(lapply(X, as.numeric))
+  ok <- complete.cases(X) & is.finite(tar)
+  X  <- X[ok, ]; tar <- tar[ok]; dates <- dates[ok]
+
+  set.seed(seed)
+  train_idx  <- sort(sample(nrow(X), floor(nrow(X) * (1 - p))))
+  test_idx   <- setdiff(seq_len(nrow(X)), train_idx)
+
+  X_train    <- X[train_idx, ];  X_test <- X[test_idx, ]
+  y_train    <- tar[train_idx];  y_test  <- tar[test_idx]
+  dates_test <- dates[test_idx]
+
+  train_df        <- X_train
+  train_df$target <- y_train
+  rf_mtry         <- if (is.null(mtry)) max(1, floor(ncol(X) / 3)) else mtry
+
+  set.seed(seed)
+  model <- randomForest(
+    formula    = as.formula(paste("target ~", paste(names(X), collapse = " + "))),
+    data       = train_df,
+    ntree      = ntree,
+    mtry       = rf_mtry,
+    importance = TRUE
+  )
+
+  y_pred <- predict(model, X_test)
+  SSres  <- sum((y_pred - y_test)^2)
+  SStot  <- sum((y_test  - mean(y_test))^2)
+
+  list(
+    model      = model,
+    y_pred     = y_pred,
+    y_test     = y_test,
+    dates_test = dates_test,
+    R2         = 1 - SSres / SStot,
+    RMSE       = sqrt(SSres / length(y_pred)),
+    MAE        = mean(abs(y_pred - y_test)),
+    n_train    = nrow(X_train),
+    n_test     = nrow(X_test),
+    n_features = ncol(X),
+    mtry       = rf_mtry
+  )
+}
+```
+
+---
+
+# Section A — No Lag
+
+**Features:** `cp_flow_mean`, `cp_tmax`, `Julian`, `air_max`, `air_min`, `cloud_pct`
+
+```{r section-a}
+base_features <- c("cp_flow_mean", "cp_tmax", "Julian", "air_max", "air_min", "cloud_pct")
+
+fits_A <- map(lead_days_vec, function(k) {
+  df <- build_df(k)
+  X  <- df |> select(all_of(base_features))
+  fit_rf(X, df$rm_8_5_tmax, df$date, ntree = ntree, mtry = mtry, p = p)
+})
+names(fits_A) <- paste0("lead_", lead_days_vec)
+
+results_A <- map2_dfr(fits_A, lead_days_vec, ~ tibble(
+  target     = "tmax",
+  section    = "A_no_lag",
+  lead_day   = .y,
+  R2         = .x$R2,
+  RMSE       = .x$RMSE,
+  MAE        = .x$MAE,
+  n_features = .x$n_features,
+  mtry       = .x$mtry,
+  n_train    = .x$n_train,
+  n_test     = .x$n_test
+))
+
+print(results_A)
+```
+
+## Section A — Predicted vs Observed (all leads)
+
+```{r plot-a-pred}
+map2_dfr(fits_A, lead_days_vec, ~ tibble(
+  lead_day = .y, predicted = .x$y_pred, observed = .x$y_test
+)) |>
+  ggplot(aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.4, color = "#185FA5", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "#E24B4A",
+              linetype = "dashed", linewidth = 0.7) +
+  facet_wrap(~paste("Lead:", lead_day, "days"), nrow = 2) +
+  labs(title = "Section A (No Lag) — Predicted vs Observed",
+       x = "Predicted (°C)", y = "Observed (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Section A — Variable Importance (lead 1)
+
+```{r plot-a-imp}
+as.data.frame(importance(fits_A$lead_1$model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#185FA5") +
+  coord_flip() +
+  labs(title = "Section A — Variable Importance, Lead 1 (%IncMSE)",
+       x = NULL, y = "% Increase in MSE") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+# Section B — Predictor Lag (t−1)
+
+**Added features:** `cp_flow_m1`, `cp_tmax_m1`, `air_max_m1`, `air_min_m1`
+
+```{r section-b}
+fits_B <- map(lead_days_vec, function(k) {
+  df <- build_df(k)
+  n  <- nrow(df)
+
+  current <- df |> slice(2:n)
+  lagged  <- df |> slice(1:(n - 1))
+
+  X <- tibble(
+    cp_flow_mean = current$cp_flow_mean,
+    cp_tmax      = current$cp_tmax,
+    Julian       = current$Julian,
+    air_max      = current$air_max,
+    air_min      = current$air_min,
+    cloud_pct    = current$cloud_pct,
+    cp_flow_m1   = lagged$cp_flow_mean,
+    cp_tmax_m1   = lagged$cp_tmax,
+    air_max_m1   = lagged$air_max,
+    air_min_m1   = lagged$air_min
+  )
+
+  fit_rf(X, current$rm_8_5_tmax, current$date, ntree = ntree, mtry = mtry, p = p)
+})
+names(fits_B) <- paste0("lead_", lead_days_vec)
+
+results_B <- map2_dfr(fits_B, lead_days_vec, ~ tibble(
+  target     = "tmax",
+  section    = "B_pred_lag",
+  lead_day   = .y,
+  R2         = .x$R2,
+  RMSE       = .x$RMSE,
+  MAE        = .x$MAE,
+  n_features = .x$n_features,
+  mtry       = .x$mtry,
+  n_train    = .x$n_train,
+  n_test     = .x$n_test
+))
+
+print(results_B)
+```
+
+## Section B — Predicted vs Observed (all leads)
+
+```{r plot-b-pred}
+map2_dfr(fits_B, lead_days_vec, ~ tibble(
+  lead_day = .y, predicted = .x$y_pred, observed = .x$y_test
+)) |>
+  ggplot(aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.4, color = "#E87722", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "#E24B4A",
+              linetype = "dashed", linewidth = 0.7) +
+  facet_wrap(~paste("Lead:", lead_day, "days"), nrow = 2) +
+  labs(title = "Section B (Predictor Lag t−1) — Predicted vs Observed",
+       x = "Predicted (°C)", y = "Observed (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Section B — Variable Importance (lead 1)
+
+```{r plot-b-imp}
+as.data.frame(importance(fits_B$lead_1$model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#E87722") +
+  coord_flip() +
+  labs(title = "Section B — Variable Importance, Lead 1 (%IncMSE)",
+       x = NULL, y = "% Increase in MSE") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+# Section C — Predictor + Target Lag (t−1)
+
+**Added feature (vs B):** `Tmax_m1`
+
+```{r section-c}
+fits_C <- map(lead_days_vec, function(k) {
+  df <- build_df(k)
+  n  <- nrow(df)
+
+  current <- df |> slice(2:n)
+  lagged  <- df |> slice(1:(n - 1))
+
+  X <- tibble(
+    cp_flow_mean = current$cp_flow_mean,
+    cp_tmax      = current$cp_tmax,
+    Julian       = current$Julian,
+    air_max      = current$air_max,
+    air_min      = current$air_min,
+    cloud_pct    = current$cloud_pct,
+    cp_flow_m1   = lagged$cp_flow_mean,
+    cp_tmax_m1   = lagged$cp_tmax,
+    air_max_m1   = lagged$air_max,
+    air_min_m1   = lagged$air_min,
+    Tmax_m1      = lagged$rm_8_5_tmax
+  )
+
+  fit_rf(X, current$rm_8_5_tmax, current$date, ntree = ntree, mtry = mtry, p = p)
+})
+names(fits_C) <- paste0("lead_", lead_days_vec)
+
+results_C <- map2_dfr(fits_C, lead_days_vec, ~ tibble(
+  target     = "tmax",
+  section    = "C_pred_tar_lag",
+  lead_day   = .y,
+  R2         = .x$R2,
+  RMSE       = .x$RMSE,
+  MAE        = .x$MAE,
+  n_features = .x$n_features,
+  mtry       = .x$mtry,
+  n_train    = .x$n_train,
+  n_test     = .x$n_test
+))
+
+print(results_C)
+```
+
+## Section C — Predicted vs Observed (all leads)
+
+```{r plot-c-pred}
+map2_dfr(fits_C, lead_days_vec, ~ tibble(
+  lead_day = .y, predicted = .x$y_pred, observed = .x$y_test
+)) |>
+  ggplot(aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.4, color = "#74A089", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "#E24B4A",
+              linetype = "dashed", linewidth = 0.7) +
+  facet_wrap(~paste("Lead:", lead_day, "days"), nrow = 2) +
+  labs(title = "Section C (Pred + Target Lag t−1) — Predicted vs Observed",
+       x = "Predicted (°C)", y = "Observed (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Section C — Variable Importance (lead 1)
+
+```{r plot-c-imp}
+as.data.frame(importance(fits_C$lead_1$model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#74A089") +
+  coord_flip() +
+  labs(title = "Section C — Variable Importance, Lead 1 (%IncMSE)",
+       x = NULL, y = "% Increase in MSE") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+# — 7DADM Target —
+
+---
+
+# Section D — No Lag (7DADM)
+
+**Target:** `rm_8_5_7dadm` | **Features:** `cp_flow_mean`, `cp_7dadm`, `Julian`, `air_max`, `air_min`, `cloud_pct`
+
+```{r section-d}
+base_features_7dadm <- c("cp_flow_mean", "cp_7dadm", "Julian", "air_max", "air_min", "cloud_pct")
+
+fits_D <- map(lead_days_vec, function(k) {
+  df <- build_df(k, rm85_7dadm, "rm_8_5_7dadm", cp_7dadm, "cp_7dadm")
+  X  <- df |> select(all_of(base_features_7dadm))
+  fit_rf(X, df$rm_8_5_7dadm, df$date, ntree = ntree, mtry = mtry, p = p)
+})
+names(fits_D) <- paste0("lead_", lead_days_vec)
+
+results_D <- map2_dfr(fits_D, lead_days_vec, ~ tibble(
+  target     = "7dadm",
+  section    = "D_no_lag",
+  lead_day   = .y,
+  R2         = .x$R2,
+  RMSE       = .x$RMSE,
+  MAE        = .x$MAE,
+  n_features = .x$n_features,
+  mtry       = .x$mtry,
+  n_train    = .x$n_train,
+  n_test     = .x$n_test
+))
+
+print(results_D)
+```
+
+## Section D — Predicted vs Observed (all leads)
+
+```{r plot-d-pred}
+map2_dfr(fits_D, lead_days_vec, ~ tibble(
+  lead_day = .y, predicted = .x$y_pred, observed = .x$y_test
+)) |>
+  ggplot(aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.4, color = "#185FA5", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "#E24B4A",
+              linetype = "dashed", linewidth = 0.7) +
+  facet_wrap(~paste("Lead:", lead_day, "days"), nrow = 2) +
+  labs(title = "Section D (7DADM, No Lag) — Predicted vs Observed",
+       x = "Predicted (°C)", y = "Observed (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Section D — Variable Importance (first lead)
+
+```{r plot-d-imp}
+as.data.frame(importance(fits_D[[1]]$model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#185FA5") +
+  coord_flip() +
+  labs(title = sprintf("Section D — Variable Importance, Lead %d (%%IncMSE)", lead_days_vec[1]),
+       x = NULL, y = "% Increase in MSE") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+# Section E — Predictor Lag (7DADM, t−1)
+
+**Added features:** `cp_flow_m1`, `cp_7dadm_m1`, `air_max_m1`, `air_min_m1`
+
+```{r section-e}
+fits_E <- map(lead_days_vec, function(k) {
+  df <- build_df(k, rm85_7dadm, "rm_8_5_7dadm", cp_7dadm, "cp_7dadm")
+  n  <- nrow(df)
+
+  current <- df |> slice(2:n)
+  lagged  <- df |> slice(1:(n - 1))
+
+  X <- tibble(
+    cp_flow_mean = current$cp_flow_mean,
+    cp_7dadm     = current$cp_7dadm,
+    Julian       = current$Julian,
+    air_max      = current$air_max,
+    air_min      = current$air_min,
+    cloud_pct    = current$cloud_pct,
+    cp_flow_m1   = lagged$cp_flow_mean,
+    cp_7dadm_m1  = lagged$cp_7dadm,
+    air_max_m1   = lagged$air_max,
+    air_min_m1   = lagged$air_min
+  )
+
+  fit_rf(X, current$rm_8_5_7dadm, current$date, ntree = ntree, mtry = mtry, p = p)
+})
+names(fits_E) <- paste0("lead_", lead_days_vec)
+
+results_E <- map2_dfr(fits_E, lead_days_vec, ~ tibble(
+  target     = "7dadm",
+  section    = "E_pred_lag",
+  lead_day   = .y,
+  R2         = .x$R2,
+  RMSE       = .x$RMSE,
+  MAE        = .x$MAE,
+  n_features = .x$n_features,
+  mtry       = .x$mtry,
+  n_train    = .x$n_train,
+  n_test     = .x$n_test
+))
+
+print(results_E)
+```
+
+## Section E — Predicted vs Observed (all leads)
+
+```{r plot-e-pred}
+map2_dfr(fits_E, lead_days_vec, ~ tibble(
+  lead_day = .y, predicted = .x$y_pred, observed = .x$y_test
+)) |>
+  ggplot(aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.4, color = "#E87722", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "#E24B4A",
+              linetype = "dashed", linewidth = 0.7) +
+  facet_wrap(~paste("Lead:", lead_day, "days"), nrow = 2) +
+  labs(title = "Section E (7DADM, Predictor Lag t−1) — Predicted vs Observed",
+       x = "Predicted (°C)", y = "Observed (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Section E — Variable Importance (first lead)
+
+```{r plot-e-imp}
+as.data.frame(importance(fits_E[[1]]$model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#E87722") +
+  coord_flip() +
+  labs(title = sprintf("Section D — Variable Importance, Lead %d (%%IncMSE)", lead_days_vec[1]),
+       x = NULL, y = "% Increase in MSE") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+# Section F — Predictor + Target Lag (7DADM, t−1)
+
+**Added feature (vs E):** `dadm_m1` (7DADM at t−1)
+
+```{r section-f}
+fits_F <- map(lead_days_vec, function(k) {
+  df <- build_df(k, rm85_7dadm, "rm_8_5_7dadm", cp_7dadm, "cp_7dadm")
+  n  <- nrow(df)
+
+  current <- df |> slice(2:n)
+  lagged  <- df |> slice(1:(n - 1))
+
+  X <- tibble(
+    cp_flow_mean = current$cp_flow_mean,
+    cp_7dadm     = current$cp_7dadm,
+    Julian       = current$Julian,
+    air_max      = current$air_max,
+    air_min      = current$air_min,
+    cloud_pct    = current$cloud_pct,
+    cp_flow_m1   = lagged$cp_flow_mean,
+    cp_7dadm_m1  = lagged$cp_7dadm,
+    air_max_m1   = lagged$air_max,
+    air_min_m1   = lagged$air_min,
+    dadm_m1      = lagged$rm_8_5_7dadm
+  )
+
+  fit_rf(X, current$rm_8_5_7dadm, current$date, ntree = ntree, mtry = mtry, p = p)
+})
+names(fits_F) <- paste0("lead_", lead_days_vec)
+
+results_F <- map2_dfr(fits_F, lead_days_vec, ~ tibble(
+  target     = "7dadm",
+  section    = "F_pred_tar_lag",
+  lead_day   = .y,
+  R2         = .x$R2,
+  RMSE       = .x$RMSE,
+  MAE        = .x$MAE,
+  n_features = .x$n_features,
+  mtry       = .x$mtry,
+  n_train    = .x$n_train,
+  n_test     = .x$n_test
+))
+
+print(results_F)
+```
+
+## Section F — Predicted vs Observed (all leads)
+
+```{r plot-f-pred}
+map2_dfr(fits_F, lead_days_vec, ~ tibble(
+  lead_day = .y, predicted = .x$y_pred, observed = .x$y_test
+)) |>
+  ggplot(aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.4, color = "#74A089", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "#E24B4A",
+              linetype = "dashed", linewidth = 0.7) +
+  facet_wrap(~paste("Lead:", lead_day, "days"), nrow = 2) +
+  labs(title = "Section F (7DADM, Pred + Target Lag t−1) — Predicted vs Observed",
+       x = "Predicted (°C)", y = "Observed (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Section F — Variable Importance (first lead)
+
+```{r plot-f-imp}
+as.data.frame(importance(fits_F[[1]]$model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#74A089") +
+  coord_flip() +
+  labs(title = sprintf("Section D — Variable Importance, Lead %d (%%IncMSE)", lead_days_vec[1]),
+       x = NULL, y = "% Increase in MSE") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+# Results Comparison
+
+```{r comparison}
+all_results <- bind_rows(results_A, results_B, results_C,
+                         results_D, results_E, results_F)
+
+section_colors <- c(
+  A_no_lag = "#185FA5", B_pred_lag = "#E87722", C_pred_tar_lag = "#74A089",
+  D_no_lag = "#185FA5", E_pred_lag = "#E87722", F_pred_tar_lag = "#74A089"
+)
+section_labels <- c(
+  A_no_lag = "No lag", B_pred_lag = "Predictor lag", C_pred_tar_lag = "Pred + target lag",
+  D_no_lag = "No lag", E_pred_lag = "Predictor lag", F_pred_tar_lag = "Pred + target lag"
+)
+
+ggplot(all_results, aes(x = lead_day, y = R2, color = section, group = section)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  facet_wrap(~target, labeller = labeller(target = c(tmax = "Max Temperature", `7dadm` = "7DADM"))) +
+  scale_color_manual(values = section_colors, labels = section_labels, name = NULL) +
+  scale_x_continuous(breaks = lead_days_vec) +
+  labs(title = "RF R² by Forecast Lead — RM 8.5",
+       x = "Forecast Lead (days)", y = "R²") +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+
+ggplot(all_results, aes(x = lead_day, y = RMSE, color = section, group = section)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  facet_wrap(~target, labeller = labeller(target = c(tmax = "Max Temperature", `7dadm` = "7DADM"))) +
+  scale_color_manual(values = section_colors, labels = section_labels, name = NULL) +
+  scale_x_continuous(breaks = lead_days_vec) +
+  labs(title = "RF RMSE by Forecast Lead — RM 8.5",
+       x = "Forecast Lead (days)", y = "RMSE (°C)") +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+
+all_results |>
+  mutate(across(c(R2, RMSE, MAE), ~ round(.x, 4))) |>
+  arrange(target, section, lead_day) |>
+  print(n = Inf)
+
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+write_csv(all_results, file.path(output_dir, "rm85_rf_results.csv"))
+cat("Results saved to:", file.path(output_dir, "rm85_rf_results.csv"), "\n")
+```
+
+---
+
+# Diagnostics
+
+Select target, section, and lead day to inspect in detail.
+
+```{r diag-setup}
+best_target  <- "tmax"             # "tmax" or "7dadm"
+best_section <- "C_pred_tar_lag"   # tmax: A/B/C  |  7dadm: D/E/F
+best_lead    <- lead_days_vec[1]
+
+fits_list <- list(
+  A_no_lag       = fits_A,
+  B_pred_lag     = fits_B,
+  C_pred_tar_lag = fits_C,
+  D_no_lag       = fits_D,
+  E_pred_lag     = fits_E,
+  F_pred_tar_lag = fits_F
+)
+best_fit <- fits_list[[best_section]][[paste0("lead_", best_lead)]]
+```
+
+## Residuals vs Predicted
+
+```{r diag-residuals}
+tibble(
+  predicted = best_fit$y_pred,
+  observed  = best_fit$y_test,
+  residual  = best_fit$y_test - best_fit$y_pred
+) |>
+  ggplot(aes(x = predicted, y = residual)) +
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dashed") +
+  geom_point(alpha = 0.4, color = "#185FA5", size = 1.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "#E24B4A", linewidth = 0.8) +
+  labs(
+    title = sprintf("Residuals vs Predicted — %s | Lead %d", best_section, best_lead),
+    x = "Predicted rm_8_5_tmax (°C)", y = "Residual (obs − pred, °C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Residual Distribution
+
+```{r diag-resid-hist}
+resid_vec <- best_fit$y_test - best_fit$y_pred
+
+tibble(residual = resid_vec) |>
+  ggplot(aes(x = residual)) +
+  geom_histogram(bins = 30, fill = "#185FA5", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = 0, color = "#E24B4A", linetype = "dashed", linewidth = 0.8) +
+  labs(
+    title = sprintf("Residual Distribution — %s | Lead %d | mean = %.3f °C",
+                    best_section, best_lead, mean(resid_vec)),
+    x = "Residual (obs − pred, °C)", y = "Count"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Test-Set Time Series
+
+```{r diag-timeseries}
+tibble(
+  date      = best_fit$dates_test,
+  observed  = best_fit$y_test,
+  predicted = best_fit$y_pred
+) |>
+  pivot_longer(c(observed, predicted), names_to = "series", values_to = "temp") |>
+  ggplot(aes(x = date, y = temp, color = series)) +
+  geom_line(alpha = 0.85, linewidth = 0.7) +
+  scale_color_manual(values = c(observed = "#185FA5", predicted = "#E24B4A"), name = NULL) +
+  labs(
+    title = sprintf("Test-Set Time Series — %s | Lead %d day(s)", best_section, best_lead),
+    x = NULL, y = "Max water temp (°C)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+## OOB Error vs Number of Trees
+
+```{r diag-oob}
+tibble(trees = seq_len(ntree), oob_mse = best_fit$model$mse) |>
+  ggplot(aes(x = trees, y = oob_mse)) +
+  geom_line(color = "#185FA5", linewidth = 0.7) +
+  labs(
+    title = sprintf("OOB MSE by Number of Trees — %s | Lead %d", best_section, best_lead),
+    x = "Trees", y = "OOB MSE"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Variable Importance — Both Metrics
+
+```{r diag-importance-both}
+as.data.frame(importance(best_fit$model)) |>
+  rownames_to_column("feature") |>
+  pivot_longer(c(`%IncMSE`, IncNodePurity), names_to = "metric", values_to = "value") |>
+  ggplot(aes(x = reorder(feature, value), y = value, fill = metric)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~metric, scales = "free_x") +
+  coord_flip() +
+  scale_fill_manual(values = c(`%IncMSE` = "#185FA5", IncNodePurity = "#74A089")) +
+  labs(
+    title = sprintf("Variable Importance — %s | Lead %d", best_section, best_lead),
+    x = NULL, y = NULL
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Variable Importance Across All Leads
+
+```{r diag-importance-leads}
+map2_dfr(fits_list[[best_section]], lead_days_vec, ~ {
+  as.data.frame(importance(.x$model)) |>
+    rownames_to_column("feature") |>
+    mutate(lead_day = .y)
+}) |>
+  ggplot(aes(x = lead_day, y = `%IncMSE`, color = feature, group = feature)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = 1:7) +
+  labs(
+    title = sprintf("Variable Importance by Lead — %s", best_section),
+    x = "Forecast Lead (days)", y = "% Increase in MSE", color = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right", panel.grid.minor = element_blank())
+```
+
+---
+
+# Save Model
+
+```{r save-model}
+# tmax model
+tmax_section <- "C_pred_tar_lag"   # A_no_lag / B_pred_lag / C_pred_tar_lag
+tmax_lead    <- lead_days_vec[1]
+
+# 7DADM model
+dadm_section <- "F_pred_tar_lag"   # D_no_lag / E_pred_lag / F_pred_tar_lag
+dadm_lead    <- lead_days_vec[1]
+
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+saveRDS(fits_list[[tmax_section]][[paste0("lead_", tmax_lead)]]$model,
+        file.path(output_dir, "rm85_rf_tmax_model.rds"))
+
+saveRDS(fits_list[[dadm_section]][[paste0("lead_", dadm_lead)]]$model,
+        file.path(output_dir, "rm85_rf_7dadm_model.rds"))
+
+cat("tmax model saved:", tmax_section, "| lead:", tmax_lead, "\n")
+cat("7DADM model saved:", dadm_section, "| lead:", dadm_lead, "\n")
+```

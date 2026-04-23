@@ -1,0 +1,3 @@
+model,lag,n_features,R2,RMSE,MAE
+ANN,yes_tar,11,0.9539,0.8044,0.5778
+Random Forest,yes_tar,11,0.9454,0.8754,0.7058

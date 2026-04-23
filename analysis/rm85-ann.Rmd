@@ -1,0 +1,436 @@
+---
+title: "ANN — Instream Temperature at RM 8.5"
+date: "`r Sys.Date()`"
+author: "Maddee Wiggins"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(neuralnet)
+library(caret)
+library(randomForest)
+library(whychusInputs)
+```
+
+# Configuration
+
+Edit these values before running.
+
+```{r config}
+m_start <- 5     # May
+m_stop  <- 9     # September
+
+h          <- 5      # number of hidden layers
+p          <- 0.2    # test proportion (fraction held out)
+iterations <- 1e5    # stepmax for neuralnet
+lag        <- "yes_tar"  # "no", "yes", or "yes_tar"
+
+output_dir  <- here::here("output")
+output_name <- "rm85_ann_results.csv"
+
+plot_results <- TRUE
+```
+
+# 1. Build Joined Dataset
+
+## 1a. RM 8.5 target (daily max temperature)
+
+```{r rm85-target}
+rm85_target <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "max") |>
+  select(date, Tmax = temperature)
+```
+
+## 1b. Camp Polk flow and temperature
+
+```{r camp-polk}
+cp_flow <- camp_polk_historical |>
+  filter(variable == "discharge (cfs)", statistic == "mean") |>
+  select(date, Q = value)
+
+cp_temp <- camp_polk_historical |>
+  filter(variable == "water temperature (c)", statistic == "max") |>
+  select(date, cp_tmax = value)
+```
+
+## 1c. Weather forecasts (day-1 lead)
+
+```{r forecasts}
+fcst <- all_historical_forecasts |>
+  filter(lead_days == 1) |>
+  select(valid_date, variable, value) |>
+  pivot_wider(names_from = variable, values_from = value) |>
+  rename(
+    date      = valid_date,
+    air_max   = temperature_2m_max,
+    air_min   = temperature_2m_min,
+    cloud_pct = cloud_cover_mean
+  )
+```
+
+## 1d. Join and filter to season
+
+```{r join}
+df_full <- rm85_target |>
+  left_join(cp_flow,  by = "date") |>
+  left_join(cp_temp,  by = "date") |>
+  left_join(fcst,     by = "date") |>
+  mutate(
+    month  = month(date),
+    Julian = yday(date),
+    year   = year(date)
+  ) |>
+  filter(month >= m_start, month <= m_stop) |>
+  filter(!is.na(Tmax), !is.na(Q), !is.na(air_max), !is.na(air_min)) |>
+  arrange(date)
+
+cat("Rows after filtering:", nrow(df_full), "\n")
+glimpse(df_full)
+```
+
+# 2. Build Feature Matrices
+
+Three versions, matching the mfjd-ann structure:
+
+| Name | Lag | Features |
+|------|-----|----------|
+| X_0 | none | Q, cp_tmax, Julian, air_max, air_min, cloud_pct |
+| X_M1 | predictors t-1 | X_0 + Q_m1, cp_tmax_m1, air_max_m1, air_min_m1 |
+| X_M1_tar | predictors + target t-1 | X_M1 + Tmax_m1 |
+
+```{r feature-matrices}
+n <- nrow(df_full)
+
+# --- No lag ---
+X_0   <- df_full |> select(Q, cp_tmax, Julian, air_max, air_min, cloud_pct)
+tar_0 <- df_full$Tmax
+
+# --- Predictor lag ---
+current <- df_full |> slice(2:n)
+lagged  <- df_full |> slice(1:(n - 1))
+
+X_M1 <- tibble(
+  Q          = current$Q,
+  cp_tmax    = current$cp_tmax,
+  Julian     = current$Julian,
+  air_max    = current$air_max,
+  air_min    = current$air_min,
+  cloud_pct  = current$cloud_pct,
+  Q_m1       = lagged$Q,
+  cp_tmax_m1 = lagged$cp_tmax,
+  air_max_m1 = lagged$air_max,
+  air_min_m1 = lagged$air_min
+)
+tar_M1 <- current$Tmax
+
+# --- Predictor + target lag ---
+X_M1_tar <- X_M1 |>
+  mutate(Tmax_m1 = lagged$Tmax)
+tar_M1_tar <- tar_M1
+
+# Select based on config
+if (lag == "no") {
+  X   <- X_0
+  tar <- tar_0
+} else if (lag == "yes") {
+  X   <- X_M1
+  tar <- tar_M1
+} else if (lag == "yes_tar") {
+  X   <- X_M1_tar
+  tar <- tar_M1_tar
+}
+
+# Drop any remaining NAs introduced by lagging
+keep <- complete.cases(X) & !is.na(tar)
+X   <- X[keep, ]
+tar <- tar[keep]
+
+# Carry dates through — same length as X and tar after keep filter
+if (lag == "no") {
+  dates_model <- df_full$date[keep]
+} else {
+  dates_model <- df_full$date[2:n][keep]
+}
+
+cat("Features:", ncol(X), "\n")
+cat("Rows for modeling:", nrow(X), "\n")
+```
+
+# 3. Train / Test Split and Scaling
+
+```{r scale}
+set.seed(42)
+train_idx <- caret::createDataPartition(tar, p = 1 - p, list = FALSE)
+
+X_train     <- X[train_idx, ]
+X_test      <- X[-train_idx, ]
+y_train     <- tar[train_idx]
+y_test      <- tar[-train_idx]
+dates_test  <- dates_model[-train_idx]   # aligned to test rows
+
+# Standard scaler fit on training data only
+preproc        <- preProcess(X_train, method = c("center", "scale"))
+X_train_scaled <- predict(preproc, X_train)
+X_test_scaled  <- predict(preproc, X_test)
+
+cat("Train rows:", nrow(X_train_scaled), "\n")
+cat("Test rows: ", nrow(X_test_scaled),  "\n")
+stopifnot(length(dates_test) == length(y_test))  # sanity check
+```
+
+# 4. Fit ANN
+
+Hidden layer size = `ncol(X) + 1` repeated `h` times, matching the mfjd approach.
+
+```{r fit-ann}
+hidden_size   <- ncol(X) + 1
+hidden_layers <- rep(hidden_size, h)
+
+cat("Hidden layer architecture:", paste(hidden_layers, collapse = " → "), "\n")
+
+train_df <- as.data.frame(X_train_scaled) |>
+  mutate(target = y_train)
+
+set.seed(42)
+model <- neuralnet(
+  target ~ Q + cp_tmax + Julian + air_max + air_min + cloud_pct +
+           Q_m1 + cp_tmax_m1 + air_max_m1 + air_min_m1 + Tmax_m1,
+  data    = train_df,
+  hidden  = c(5, 3),
+  linear.output = TRUE,
+  stepmax = 1e6
+)
+
+cat("Training complete.\n")
+```
+
+# 5. Evaluate
+
+```{r evaluate}
+# data.matrix() ensures a plain numeric matrix — tibble columns confuse neuralnet
+y_pred <- neuralnet::compute(model, data.matrix(X_test_scaled))$net.result[, 1]
+
+SSres <- sum((y_pred - y_test)^2)
+SStot <- sum((y_test - mean(y_test))^2)
+R2    <- 1 - SSres / SStot
+RMSE  <- sqrt(SSres / length(y_pred))
+MAE   <- mean(abs(y_pred - y_test))
+
+cat(sprintf("R²:   %.4f\n", R2))
+cat(sprintf("RMSE: %.4f °C\n", RMSE))
+cat(sprintf("MAE:  %.4f °C\n", MAE))
+```
+
+# 6. Diagnostic Plots
+
+## 6a. Predicted vs Observed
+
+```{r plot-pred-obs}
+plot_df <- tibble(predicted = y_pred, observed = y_test)
+ax_max  <- ceiling(max(c(y_pred, y_test)) * 1.05)
+
+ggplot(plot_df, aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.5, color = "#185FA5", size = 1.5) +
+  geom_abline(slope = 1, intercept = 0,
+              color = "#E24B4A", linetype = "dashed", linewidth = 0.9) +
+  coord_equal(xlim = c(0, ax_max), ylim = c(0, ax_max)) +
+  annotate("text", x = 0.05 * ax_max, y = 0.95 * ax_max, hjust = 0,
+           label = sprintf("R² = %.3f\nRMSE = %.2f °C", R2, RMSE),
+           size = 4, color = "grey30") +
+  labs(
+    title    = sprintf("ANN — RM 8.5 max daily temperature (%d hidden layers)", h),
+    subtitle = sprintf("lag = '%s'  |  features = %d", lag, ncol(X)),
+    x = "Predicted Tmax (°C)", y = "Observed Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 6b. Residuals vs Predicted
+
+```{r plot-residuals}
+plot_df |>
+  mutate(residual = observed - predicted) |>
+  ggplot(aes(x = predicted, y = residual)) +
+  geom_hline(yintercept = 0, color = "grey50", linetype = "dashed") +
+  geom_point(alpha = 0.4, color = "#74A089", size = 1.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "#E24B4A",
+              linewidth = 0.8) +
+  labs(
+    title = "Residuals vs Predicted — RM 8.5 ANN",
+    x = "Predicted Tmax (°C)", y = "Residual (obs − pred, °C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 6c. Time-Series Comparison (Test Set)
+
+```{r plot-timeseries}
+tibble(
+  date      = dates_test,
+  observed  = y_test,
+  predicted = y_pred
+) |>
+  pivot_longer(c(observed, predicted), names_to = "series", values_to = "temp") |>
+  ggplot(aes(x = date, y = temp, color = series)) +
+  geom_line(alpha = 0.8, linewidth = 0.7) +
+  scale_color_manual(values = c(observed = "#185FA5", predicted = "#E24B4A"),
+                     name = NULL) +
+  labs(
+    title = "Test-set time series — RM 8.5 ANN",
+    x = NULL, y = "Max water temp (°C)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+```
+
+# 7. Results Summary
+
+```{r results-table}
+results <- tibble(
+  target        = "RM 8.5 Tmax",
+  lag           = lag,
+  n_features    = ncol(X),
+  hidden_layers = h,
+  hidden_size   = hidden_size,
+  n_train       = nrow(X_train),
+  n_test        = nrow(X_test),
+  R2            = round(R2,   4),
+  RMSE          = round(RMSE, 4),
+  MAE           = round(MAE,  4)
+)
+
+print(results)
+
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+write_csv(results, file.path(output_dir, output_name))
+```
+
+# 8. Save Model and Scaler
+
+```{r save-model}
+saveRDS(model,   file.path(output_dir, "rm85_ann_model.rds"))
+saveRDS(preproc, file.path(output_dir, "rm85_scaler.rds"))
+
+cat("Model saved to:  ", file.path(output_dir, "rm85_ann_model.rds"), "\n")
+cat("Scaler saved to: ", file.path(output_dir, "rm85_scaler.rds"),    "\n")
+
+# To reload and predict on new data:
+# model2  <- readRDS(file.path(output_dir, "rm85_ann_model.rds"))
+# scaler2 <- readRDS(file.path(output_dir, "rm85_scaler.rds"))
+# new_scaled <- predict(scaler2, new_data)   # new_data must have same feature names
+# preds      <- predict(model2, new_scaled)[, 1]
+```
+
+# 9. Random Forest Comparison
+
+## 9a. Fit Random Forest
+
+RF doesn't require feature scaling, so raw `X_train`/`X_test` are used directly.
+
+```{r fit-rf}
+rf_train_df <- as.data.frame(X_train) |> mutate(target = y_train)
+
+set.seed(42)
+rf_model <- randomForest(
+  formula    = as.formula(paste("target ~", paste(names(X), collapse = " + "))),
+  data       = rf_train_df,
+  ntree      = 500,
+  importance = TRUE
+)
+
+cat("RF training complete.\n")
+```
+
+## 9b. Evaluate Random Forest
+
+```{r evaluate-rf}
+y_pred_rf <- predict(rf_model, as.data.frame(X_test))
+
+SSres_rf <- sum((y_pred_rf - y_test)^2)
+R2_rf    <- 1 - SSres_rf / SStot
+RMSE_rf  <- sqrt(SSres_rf / length(y_pred_rf))
+MAE_rf   <- mean(abs(y_pred_rf - y_test))
+
+cat(sprintf("RF R²:   %.4f\n",    R2_rf))
+cat(sprintf("RF RMSE: %.4f °C\n", RMSE_rf))
+cat(sprintf("RF MAE:  %.4f °C\n", MAE_rf))
+```
+
+## 9c. ANN vs RF — Summary Table
+
+```{r comparison-table}
+comparison <- tibble(
+  model      = c("ANN", "Random Forest"),
+  lag        = lag,
+  n_features = ncol(X),
+  R2         = round(c(R2,   R2_rf),   4),
+  RMSE       = round(c(RMSE, RMSE_rf), 4),
+  MAE        = round(c(MAE,  MAE_rf),  4)
+)
+
+print(comparison)
+write_csv(comparison, file.path(output_dir, "rm85_model_comparison.csv"))
+```
+
+## 9d. Predicted vs Observed — Side by Side
+
+```{r plot-comparison}
+ax_max <- ceiling(max(c(y_pred, y_pred_rf, y_test)) * 1.05)
+
+bind_rows(
+  tibble(model = "ANN",          predicted = y_pred,    observed = y_test),
+  tibble(model = "Random Forest", predicted = y_pred_rf, observed = y_test)
+) |>
+  ggplot(aes(x = predicted, y = observed, color = model)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  geom_abline(slope = 1, intercept = 0,
+              color = "black", linetype = "dashed", linewidth = 0.8) +
+  facet_wrap(~model) +
+  coord_equal(xlim = c(0, ax_max), ylim = c(0, ax_max)) +
+  scale_color_manual(values = c("ANN" = "#185FA5", "Random Forest" = "#E87722")) +
+  labs(
+    title    = "ANN vs Random Forest — RM 8.5 max daily temperature",
+    subtitle = sprintf("ANN R² = %.3f  |  RF R² = %.3f", R2, R2_rf),
+    x = "Predicted Tmax (°C)", y = "Observed Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none", panel.grid.minor = element_blank())
+```
+
+## 9e. RF Variable Importance
+
+```{r plot-importance}
+as.data.frame(importance(rf_model)) |>
+  rownames_to_column("feature") |>
+  arrange(desc(`%IncMSE`)) |>
+  ggplot(aes(x = reorder(feature, `%IncMSE`), y = `%IncMSE`)) +
+  geom_col(fill = "#E87722") +
+  coord_flip() +
+  labs(
+    title = "Random Forest — Variable Importance (RM 8.5)",
+    x     = NULL,
+    y     = "% Increase in MSE"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 9f. Save RF Model
+
+```{r save-rf}
+saveRDS(rf_model, file.path(output_dir, "rm85_rf_model.rds"))
+cat("RF model saved to:", file.path(output_dir, "rm85_rf_model.rds"), "\n")
+```
