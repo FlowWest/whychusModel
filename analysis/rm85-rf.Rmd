@@ -807,22 +807,20 @@ map2_dfr(fits_list[[best_section]], lead_days_vec, ~ {
 # Save Model
 
 ```{r save-model}
-# tmax model
-tmax_section <- "C_pred_tar_lag"   # A_no_lag / B_pred_lag / C_pred_tar_lag
-tmax_lead    <- lead_days_vec[1]
-
-# 7DADM model
-dadm_section <- "F_pred_tar_lag"   # D_no_lag / E_pred_lag / F_pred_tar_lag
-dadm_lead    <- lead_days_vec[1]
+tmax_section <- "C_pred_tar_lag"
+dadm_section <- "F_pred_tar_lag"
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-saveRDS(fits_list[[tmax_section]][[paste0("lead_", tmax_lead)]]$model,
-        file.path(output_dir, "rm85_rf_tmax_model.rds"))
+for (k in lead_days_vec) {
+  lead_str <- paste0("lead_", k)
 
-saveRDS(fits_list[[dadm_section]][[paste0("lead_", dadm_lead)]]$model,
-        file.path(output_dir, "rm85_rf_7dadm_model.rds"))
+  saveRDS(fits_list[[tmax_section]][[lead_str]]$model,
+          file.path(output_dir, paste0("rm85_rf_tmax_lead", k, ".rds")))
 
-cat("tmax model saved:", tmax_section, "| lead:", tmax_lead, "\n")
-cat("7DADM model saved:", dadm_section, "| lead:", dadm_lead, "\n")
+  saveRDS(fits_list[[dadm_section]][[lead_str]]$model,
+          file.path(output_dir, paste0("rm85_rf_7dadm_lead", k, ".rds")))
+
+  cat("Saved: rm85_rf_tmax_lead", k, ".rds  |  rm85_rf_7dadm_lead", k, ".rds\n", sep = "")
+}
 ```

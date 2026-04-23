@@ -1,0 +1,321 @@
+---
+title: "RM 8.5 Instream Temperature Forecasting — RF Model"
+author: "Maddee Rubenson (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 4)
+
+library(tidyverse)
+library(lubridate)
+library(randomForest)
+library(zoo)
+library(whychusModel)
+```
+
+# Configuration
+
+The RM 8.5 lag always uses the last available observation from
+`rm_8_5_historical` until a real-time sensor is installed.
+
+```{r config}
+# ── Lead days to forecast ─────────────────────────────────────────────────────
+lead_days_vec <- c(1, 3, 7)
+
+# ── Station / gridpoint ───────────────────────────────────────────────────────
+owrd_station  <- "14076100"    # Camp Polk
+nws_gridpoint <- "PDT/35,57"  # RM 8.5 area; verify at:
+# https://api.weather.gov/points/44.390278,-121.406792
+
+# ── Saved model paths (keyed by lead day) ────────────────────────────────────
+tmax_model_paths <- setNames(
+  lapply(lead_days_vec, \(k) here::here("output", paste0("rm85_rf_tmax_lead", k, ".rds"))),
+  paste0("lead_", lead_days_vec)
+)
+dadm_model_paths <- setNames(
+  lapply(lead_days_vec, \(k) here::here("output", paste0("rm85_rf_7dadm_lead", k, ".rds"))),
+  paste0("lead_", lead_days_vec)
+)
+
+# ── Regulatory thresholds (°C) ────────────────────────────────────────────────
+threshold_7dadm <- 17.8 # ODEQ
+threshold_tmax  <- 20.0 # HCP
+```
+
+---
+
+# 1. Camp Polk Hydrology
+
+Pull instantaneous flow and temperature for the
+last 10 days — enough to compute 7DADM and one day of lag.
+
+TODO: need to think through when this data pull occurs to get the most representative "TODAY" values when we aggregate to mean flow and max temperature
+
+```{r owrd-pull}
+pull_start <- Sys.Date() - 10
+pull_end   <- Sys.Date()
+
+# ── Live OWRD pull ──────────────────────────────────────────────────────────
+cp_flow_raw <- get_owrd_hydro(
+  station_nbr = owrd_station,
+  start_date  = pull_start,
+  end_date    = pull_end,
+  data_source = "Instantaneous_Flow"
+)
+
+cp_tmax_raw <- get_owrd_hydro(
+  station_nbr = owrd_station,
+  start_date  = pull_start,
+  end_date    = pull_end,
+  data_source = "WTEMP15"
+) 
+
+```
+
+```{r owrd-inspect, results='hold'}
+# Inspect raw column names — update the rename() calls below if yours differ
+cat("Flow columns:  ", paste(names(cp_flow_raw), collapse = ", "), "\n")
+cat("Temp columns:  ", paste(names(cp_tmax_raw), collapse = ", "), "\n")
+```
+
+```{r owrd-clean}
+cp_flow <- cp_flow_raw |> 
+  mutate(date = as.Date(
+    parse_date_time(record_date, orders = c("mdy", "mdy HM"))
+  )) |> 
+  group_by(date) |> 
+  summarise(cp_flow_mean = mean(instananteous_flow_cfs)) |> 
+  select(date, cp_flow_mean) |>
+  arrange(date)
+
+cp_tmax <- cp_tmax_raw |> 
+  mutate(date = as.Date(
+    parse_date_time(record_date, orders = c("mdy", "mdy HM"))
+  )) |> 
+  group_by(date) |> 
+  summarise(cp_tmax = max(instantaneous_water_temp_c)) |> 
+  select(date, cp_tmax) |>
+  arrange(date)
+
+# Compute 7DADM as 7-day rolling mean of daily max temperature
+cp_7dadm <- cp_tmax |>
+  mutate(cp_7dadm = rollmean(cp_tmax, k = 7, fill = NA, align = "right"))
+
+# Today's and yesterday's rows (used as lag predictors across all lead models)
+cp_today <- cp_flow |>
+  filter(date == Sys.Date()) |>
+  left_join(cp_tmax, by = "date") |>
+  left_join(cp_7dadm |> select(date, cp_7dadm), by = "date")
+
+cp_yest <- cp_flow |>
+  filter(date == Sys.Date() - 1) |>
+  left_join(cp_tmax, by = "date") |>
+  left_join(cp_7dadm |> select(date, cp_7dadm), by = "date")
+```
+
+```{r owrd-plot, fig.height=3}
+cp_tmax |>
+  left_join(cp_7dadm |> select(date, cp_7dadm), by = "date") |>
+  pivot_longer(c(cp_tmax, cp_7dadm), names_to = "metric", values_to = "temp_c") |>
+  ggplot(aes(x = date, y = temp_c, color = metric)) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_color_manual(values = c(cp_tmax = "#C93312", cp_7dadm = "#185FA5"),
+                     labels = c(cp_tmax = "Daily Max", cp_7dadm = "7DADM")) +
+  labs(title = "Camp Polk Water Temperature (recent)", x = NULL,
+       y = "Temperature (°C)", color = NULL) +
+  theme_minimal()
+```
+
+---
+
+# 2. NWS Air Temperature & Cloud Cover
+
+Fetch max air temperature, min air temperature, and sky cover for the full
+forecast window. Results from `get_nws_forecast()` have columns:
+`datetime`, `value`, `duration`, `variable`. A single pull covers all three
+lead days (NWS returns a rolling 7-day window).
+
+```{r nws-pull}
+# ── Live NWS pull ───────────────────────────────────────────────────────────
+nws_tmax  <- get_nws_forecast(nws_gridpoint, "maxTemperature")
+nws_tmin  <- get_nws_forecast(nws_gridpoint, "minTemperature")
+nws_cloud <- get_nws_forecast(nws_gridpoint, "skyCover")
+```
+
+```{r nws-helper}
+# Helper: collapse hourly/sub-daily NWS values to one number per calendar day
+daily_nws <- function(df, target_date, agg_fn = mean) {
+  df |>
+    mutate(date = as.Date(datetime)) |>
+    filter(date == target_date) |>
+    summarise(value = agg_fn(value, na.rm = TRUE)) |>
+    pull(value)
+}
+```
+
+---
+
+# 3. RM 8.5 Previous-Day Temperature (Dummy Lag)
+
+The lagged RM 8.5 temperature (`Tmax_m1` / `dadm_m1`) is the most important
+predictor in both models. Until a real-time sensor is online, use the last
+available observation from `rm_8_5_historical`. The same lag value is used
+across all lead days — this is an approximation for leads > 1 day.
+
+```{r rm85-lag}
+rm85_last_tmax <- rm_8_5_historical |>
+  filter(statistic == "max") |>
+  filter(month(date) == month(Sys.Date()),
+         day(date)   == day(Sys.Date())) |> 
+  mutate(date = as.Date(date)) |>
+  arrange(desc(date)) |>
+  slice(1)
+
+rm85_last_dadm <- rm_8_5_historical |>
+  filter(statistic == "7DADM") |>
+  mutate(date = as.Date(date)) |>
+  filter(month(date) == month(Sys.Date()),
+         day(date)   == day(Sys.Date())) |> 
+  arrange(desc(date)) |>
+  slice(1)
+
+Tmax_m1 <- rm85_last_tmax$temperature
+dadm_m1 <- rm85_last_dadm$temperature
+
+cat(sprintf(
+  "RM 8.5 lag source: last historical observation\n  Tmax_m1 = %.2f °C  (from %s)\n  dadm_m1 = %.2f °C  (from %s)\n",
+  Tmax_m1, rm85_last_tmax$date,
+  dadm_m1, rm85_last_dadm$date
+))
+```
+
+> **When a real-time sensor is installed:** replace this chunk with a live
+> `get_8_5_realtime` call for the RM 8.5.
+> No other changes to the pipeline are needed.
+
+---
+
+# 4. Predict Across All Lead Days
+
+For each lead day the model uses:
+
+- **NWS air temp / cloud:** the k-day-ahead forecast for the valid date and
+the day before (from the single NWS pull above)
+- **Camp Polk flow/temp:** today's and yesterday's observed values — used as
+the lag predictors for all leads (approximation for leads > 1; future Camp
+Polk conditions are unknown)
+- **RM 8.5 lag:** the last available observation (same across all leads)
+
+```{r predict-all-leads}
+results_list <- map(lead_days_vec, function(k) {
+  fdate    <- Sys.Date() + k
+  lead_key <- paste0("lead_", k)
+  
+  # NWS values for this lead's valid date and the day before
+  air_max_k    <- daily_nws(nws_tmax,  fdate,     max)
+  air_min_k    <- daily_nws(nws_tmin,  fdate,     min)
+  cloud_k      <- daily_nws(nws_cloud, fdate,     mean)
+  air_max_m1_k <- daily_nws(nws_tmax,  fdate - 1, max)
+  air_min_m1_k <- daily_nws(nws_tmin,  fdate - 1, min)
+  
+  # ── Tmax model features (Section C) ──────────────────────────────────────
+  feat_tmax <- data.frame(
+    cp_flow_mean = cp_today$cp_flow_mean,
+    cp_tmax      = cp_today$cp_tmax,
+    Julian       = yday(fdate),
+    air_max      = air_max_k,
+    air_min      = air_min_k,
+    cloud_pct    = cloud_k,
+    cp_flow_m1   = cp_yest$cp_flow_mean,
+    cp_tmax_m1   = cp_yest$cp_tmax,
+    air_max_m1   = air_max_m1_k,
+    air_min_m1   = air_min_m1_k,
+    Tmax_m1      = Tmax_m1
+  ) 
+  
+  # ── 7DADM model features (Section F) ─────────────────────────────────────
+  feat_7dadm <- data.frame(
+    cp_flow_mean = cp_today$cp_flow_mean,
+    cp_7dadm     = cp_today$cp_7dadm,
+    Julian       = yday(fdate),
+    air_max      = air_max_k,
+    air_min      = air_min_k,
+    cloud_pct    = cloud_k,
+    cp_flow_m1   = cp_yest$cp_flow_mean,
+    cp_7dadm_m1  = cp_yest$cp_7dadm,
+    air_max_m1   = air_max_m1_k,
+    air_min_m1   = air_min_m1_k,
+    dadm_m1      = dadm_m1
+  ) 
+  
+  rf_tmax  <- readRDS(tmax_model_paths[[lead_key]])
+  rf_7dadm <- readRDS(dadm_model_paths[[lead_key]])
+  
+  tibble(
+    lead_day     = k,
+    forecast_date = fdate,
+    pred_tmax_C  = round(predict(rf_tmax,  feat_tmax),  2),
+    pred_7dadm_C = round(predict(rf_7dadm, feat_7dadm), 2)
+  )
+})
+
+results <- bind_rows(results_list) |>
+  mutate(
+    exceed_tmax  = pred_tmax_C  > threshold_tmax,
+    exceed_7dadm = pred_7dadm_C > threshold_7dadm,
+    rm85_lag_source = paste0("last obs (", rm85_last_tmax$date, ")")
+  )
+```
+
+---
+
+# 5. Results
+
+```{r results-table}
+knitr::kable(
+  results |> select(lead_day, forecast_date, pred_tmax_C, pred_7dadm_C,
+                    exceed_tmax, exceed_7dadm),
+  col.names = c("Lead (days)", "Forecast Date",
+                "Pred Tmax (°C)", "Pred 7DADM (°C)",
+                paste0("Tmax > ", threshold_tmax, " °C"),
+                paste0("7DADM > ", threshold_7dadm, " °C")),
+  align = "clcccc"
+)
+```
+
+```{r results-plot, fig.height=4}
+results |>
+  select(lead_day, forecast_date, pred_tmax_C, pred_7dadm_C) |>
+  pivot_longer(c(pred_tmax_C, pred_7dadm_C),
+               names_to = "metric", values_to = "temp_c") |>
+  mutate(
+    metric    = recode(metric, pred_tmax_C = "Daily Max (Tmax)",
+                       pred_7dadm_C = "7-Day Avg Daily Max (7DADM)"),
+    threshold = if_else(metric == "Daily Max (Tmax)", threshold_tmax, threshold_7dadm)
+  ) |>
+  ggplot(aes(x = forecast_date, y = temp_c)) +
+  geom_hline(aes(yintercept = threshold), linetype = "dashed",
+             color = "#C93312", linewidth = 0.7) +
+  geom_line(color = "#185FA5", linewidth = 0.8) +
+  geom_point(aes(shape = factor(lead_day)), color = "#185FA5", size = 3) +
+  geom_text(aes(label = sprintf("%.1f", temp_c)),
+            vjust = -0.8, size = 3.2, color = "#333333") +
+  facet_wrap(~metric, ncol = 1, scales = "free_y") +
+  scale_shape_manual(values = c("1" = 16, "3" = 17, "7" = 15),
+                     name = "Lead (days)") +
+  scale_x_date(date_labels = "%b %d", breaks = results$forecast_date) +
+  labs(title = paste("RM 8.5 Temperature Forecast — issued", Sys.Date()),
+       x = "Forecast Date", y = "Temperature (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold"))
+```

@@ -2385,26 +2385,25 @@ tibble(residual = resid_vec) |&gt;
 </div>
 <div id="save-model" class="section level1">
 <h1>Save Model</h1>
-<pre class="r"><code># tmax model
-tmax_section &lt;- &quot;C_pred_tar_lag&quot;   # A_no_lag / B_pred_lag / C_pred_tar_lag
-tmax_lead    &lt;- lead_days_vec[1]
-
-# 7DADM model
-dadm_section &lt;- &quot;F_pred_tar_lag&quot;   # D_no_lag / E_pred_lag / F_pred_tar_lag
-dadm_lead    &lt;- lead_days_vec[1]
+<pre class="r"><code>tmax_section &lt;- &quot;C_pred_tar_lag&quot;
+dadm_section &lt;- &quot;F_pred_tar_lag&quot;
 
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-saveRDS(fits_list[[tmax_section]][[paste0(&quot;lead_&quot;, tmax_lead)]]$model,
-        file.path(output_dir, &quot;rm85_rf_tmax_model.rds&quot;))
+for (k in lead_days_vec) {
+  lead_str &lt;- paste0(&quot;lead_&quot;, k)
 
-saveRDS(fits_list[[dadm_section]][[paste0(&quot;lead_&quot;, dadm_lead)]]$model,
-        file.path(output_dir, &quot;rm85_rf_7dadm_model.rds&quot;))
+  saveRDS(fits_list[[tmax_section]][[lead_str]]$model,
+          file.path(output_dir, paste0(&quot;rm85_rf_tmax_lead&quot;, k, &quot;.rds&quot;)))
 
-cat(&quot;tmax model saved:&quot;, tmax_section, &quot;| lead:&quot;, tmax_lead, &quot;\n&quot;)</code></pre>
-<pre><code>## tmax model saved: C_pred_tar_lag | lead: 1</code></pre>
-<pre class="r"><code>cat(&quot;7DADM model saved:&quot;, dadm_section, &quot;| lead:&quot;, dadm_lead, &quot;\n&quot;)</code></pre>
-<pre><code>## 7DADM model saved: F_pred_tar_lag | lead: 1</code></pre>
+  saveRDS(fits_list[[dadm_section]][[lead_str]]$model,
+          file.path(output_dir, paste0(&quot;rm85_rf_7dadm_lead&quot;, k, &quot;.rds&quot;)))
+
+  cat(&quot;Saved: rm85_rf_tmax_lead&quot;, k, &quot;.rds  |  rm85_rf_7dadm_lead&quot;, k, &quot;.rds\n&quot;, sep = &quot;&quot;)
+}</code></pre>
+<pre><code>## Saved: rm85_rf_tmax_lead1.rds  |  rm85_rf_7dadm_lead1.rds
+## Saved: rm85_rf_tmax_lead3.rds  |  rm85_rf_7dadm_lead3.rds
+## Saved: rm85_rf_tmax_lead7.rds  |  rm85_rf_7dadm_lead7.rds</code></pre>
 </div>
 
 
