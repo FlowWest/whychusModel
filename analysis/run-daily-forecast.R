@@ -1,11 +1,10 @@
-suppressPackageStartupMessages({
-  library(tidyverse)
-  library(lubridate)
-  library(randomForest)
-  library(zoo)
-  library(here)
-  library(whychusModel)
-})
+.libPaths(c(Sys.getenv("R_LIBS_USER"), .libPaths()))
+library(tidyverse)
+library(lubridate)
+library(randomForest)
+library(zoo)
+library(here)
+library(whychusModel)
 
 today <- Sys.Date()
 cat(sprintf("Running RM 8.5 forecast for %s\n", today))
