@@ -164,7 +164,8 @@ results_list <- map(lead_days_vec, function(k) {
     pred_tmax_C    = round(predict(rf_tmax,  feat_tmax),  2),
     pred_7dadm_C   = round(predict(rf_7dadm, feat_7dadm), 2),
     actual_tmax_C  = if (length(actual_tmax) > 0) actual_tmax[[1]] else NA_real_,
-    actual_7dadm_C = if (length(actual_dadm) > 0) actual_dadm[[1]] else NA_real_
+    actual_7dadm_C = if (length(actual_dadm) > 0) actual_dadm[[1]] else NA_real_,
+    note = "dummy data"
   )
 })
 

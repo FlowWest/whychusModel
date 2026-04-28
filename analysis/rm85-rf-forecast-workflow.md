@@ -1,54 +1,68 @@
+---
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
 # RM 8.5 Instream Temperature Forecasting — RF Model Workflow
 
-**Targets:** Daily Maximum Temperature (Tmax) and 7-Day Average Daily Maximum (7DADM)  
-**Models:** Saved Random Forest objects from `output/rm85_rf_tmax_model.rds` and `output/rm85_rf_7dadm_model.rds`  
-**Model configuration:** Section C (Tmax) / Section F (7DADM) — predictor lags + lagged target variable, Lead = 1 day
+**Targets:** Daily Maximum Temperature (Tmax) and 7-Day Average Daily
+Maximum (7DADM)\
+**Models:** Saved Random Forest objects from
+`output/rm85_rf_tmax_model.rds` and `output/rm85_rf_7dadm_model.rds`\
+**Model configuration:** Section C (Tmax) / Section F (7DADM) —
+predictor lags + lagged target variable, Lead = 1 day
 
----
+------------------------------------------------------------------------
 
 ## Overview
 
 The pipeline has four stages:
 
-1. **Pull real-time hydrology** — Camp Polk flow and temperature via `get_owrd_hydro()`
-2. **Pull NWS weather forecast** — air temperature and cloud cover via `get_nws_forecast()`
-3. **Supply RM 8.5 previous-day temperature** — from a dummy value until a real-time sensor is installed
-4. **Assemble features → predict** — join, lag, and pass to the saved RF models
+1.  **Pull real-time hydrology** — Camp Polk flow and temperature via
+    `get_owrd_hydro()`
+2.  **Pull NWS weather forecast** — air temperature and cloud cover via
+    `get_nws_forecast()`
+3.  **Supply RM 8.5 previous-day temperature** — from a dummy value
+    until a real-time sensor is installed
+4.  **Assemble features → predict** — join, lag, and pass to the saved
+    RF models
 
-```
+```         
 get_owrd_hydro()       ─┐
 get_nws_forecast()     ─┼─► feature table ─► RF model ─► Tmax / 7DADM forecast
 dummy RM 8.5 lag temp  ─┘
 ```
 
----
+------------------------------------------------------------------------
 
 ## 0. Setup
 
-```r
+``` r
 library(tidyverse)
 library(lubridate)
 library(randomForest)
 library(whychusModel)   # get_owrd_hydro(), get_nws_forecast()
 
-# Date to forecast for (tomorrow's temperature)
-forecast_date <- Sys.Date() + 1
+# Date to forecast for (tomorrow's temperature, 3-days, 7-days)
+forecast_date <- Sys.Date() + 1 # 3, 7
 
 # Paths to saved models
 tmax_model_path  <- here::here("output", "rm85_rf_tmax_model.rds")
 dadm_model_path  <- here::here("output", "rm85_rf_7dadm_model.rds")
 ```
 
----
+------------------------------------------------------------------------
 
 ## 1. Pull Camp Polk Hydrology via `get_owrd_hydro()`
 
-The models need **today's** Camp Polk mean flow, max temperature, and 7DADM, plus
-**yesterday's** values as lagged predictors. Pull the last 3 days to be safe.
+The models need **today's** Camp Polk mean flow, max temperature, and
+7DADM, plus **yesterday's** values as lagged predictors. Pull the last 10
+days to be safe and able to calculate the 7DADM. 
 
-```r
+``` r
 owrd_station <- "14076100"   # Camp Polk
-pull_start   <- Sys.Date() - 3
+pull_start   <- Sys.Date() - 10
 pull_end     <- Sys.Date()
 
 # Mean daily flow (CFS)
@@ -70,14 +84,14 @@ cp_tmax_raw <- get_owrd_hydro(
 
 ### Expected output shape
 
-`get_owrd_hydro()` returns a tibble with cleaned column names (via `janitor::clean_names()`).
-The exact column names depend on the OWRD response, but typically include a date column
-and a value column. Inspect with `glimpse(cp_flow_raw)` and rename as needed.
+`get_owrd_hydro()` returns a tibble with cleaned column names (via
+`janitor::clean_names()`). The exact column names depend on the OWRD
+response, but typically include a date column and a value column.
+Inspect with `glimpse(cp_flow_raw)` and rename as needed.
 
-```r
-# Standardize — adjust column names to match your OWRD response
+``` r
 cp_flow <- cp_flow_raw |>
-  mutate(date = as.Date(record_date)) |>   # rename to match your output
+  mutate(date = as.Date(record_date)) |>   
   select(date, cp_flow_mean = mean_daily_flow_cfs)
 
 cp_tmax <- cp_tmax_raw |>
@@ -87,28 +101,28 @@ cp_tmax <- cp_tmax_raw |>
 
 ### Compute Camp Polk 7DADM
 
-`get_owrd_hydro()` does not return 7DADM directly. Compute it from the max daily
-temperature using the last 7 days of data.
+`get_owrd_hydro()` does not return 7DADM directly. Compute it from the
+max daily temperature using the last 10 days of data.
 
-```r
+``` r
 cp_7dadm <- cp_tmax |>
   arrange(date) |>
   mutate(cp_7dadm = zoo::rollmean(cp_tmax, k = 7, fill = NA, align = "right"))
 ```
 
-> **Note:** If fewer than 7 days of Camp Polk data are available, extend `pull_start`
-> to `Sys.Date() - 10` and re-run.
+> **Note:** If Camp Polk temperature is offline, explore the use of Whychus nr Sisters OWRD gage or the installation of another real-time sensor at Camp Polk
 
----
+------------------------------------------------------------------------
 
 ## 2. Pull NWS Air Temperature & Cloud Cover via `get_nws_forecast()`
 
-The models use **forecasted** max air temp, min air temp, and cloud cover for the
-valid date (forecast_date). The NWS gridpoint for the Whychus Creek area near Sisters, OR
-is approximately `"PDT/35,57"` — verify with `https://api.weather.gov/points/44.3903,-121.4068`.
+The models use **forecasted** max air temp, min air temp, and cloud
+cover for the valid date (forecast_date). The NWS gridpoint for the
+Whychus Creek area near Sisters, OR is approximately `"PDT/35,57"` —
+verify with `https://api.weather.gov/points/44.3903,-121.4068`.
 
-```r
-nws_gridpoint <- "PDT/35,57"   # confirm this for your exact location
+``` r
+nws_gridpoint <- "PDT/35,57"  
 
 nws_tmax  <- get_nws_forecast(nws_gridpoint, "maxTemperature")
 nws_tmin  <- get_nws_forecast(nws_gridpoint, "minTemperature")
@@ -117,10 +131,10 @@ nws_cloud <- get_nws_forecast(nws_gridpoint, "skyCover")
 
 ### Aggregate to daily values for the forecast date
 
-`get_nws_forecast()` returns hourly or sub-daily records. Roll them up to one
-value per day.
+`get_nws_forecast()` returns hourly or sub-daily records. Roll them up
+to one value per day.
 
-```r
+``` r
 # Helper: extract daily summary for a single date
 daily_nws <- function(df, target_date, agg_fn = mean) {
   df |>
@@ -135,39 +149,33 @@ air_min_fcst   <- daily_nws(nws_tmin,  forecast_date, min)
 cloud_pct_fcst <- daily_nws(nws_cloud, forecast_date, mean)
 ```
 
-> For `maxTemperature` and `minTemperature` the NWS often returns one value per
-> day already; the aggregation is a safety net.
+> For `maxTemperature` and `minTemperature` the NWS often returns one
+> value per day already; the aggregation is a safety net.
 
 ### Yesterday's NWS values (lagged air predictors)
 
-The Section C/F models include lagged air temperature predictors (`air_max_m1`,
-`air_min_m1`). Pull yesterday's forecast or, if available, pull observed values.
+The Section C/F models include lagged air temperature predictors
+(`air_max_m1`, `air_min_m1`). Pull yesterday's forecast or, if
+available, pull observed values.
 
-```r
+> TODO: Will need to think through the storing of forecasts 
+
+``` r
 yesterday <- Sys.Date()   # yesterday relative to forecast_date
 
 air_max_m1   <- daily_nws(nws_tmax,  yesterday, max)
 air_min_m1   <- daily_nws(nws_tmin,  yesterday, min)
 ```
 
----
+------------------------------------------------------------------------
 
 ## 3. Dummy RM 8.5 Previous-Day Temperature
 
-The most important predictor in both models is the **previous day's RM 8.5
-temperature** (`Tmax_m1` for the Tmax model, `dadm_m1` for the 7DADM model).
-Until a real-time sensor is installed at RM 8.5, substitute a plausible value.
+The most important predictor in both models is the **previous day's RM
+8.5 temperature** (`Tmax_m1` for the Tmax model, `dadm_m1` for the 7DADM
+model). Until a real-time sensor is installed at RM 8.5, substitute the same day of the previous year.
 
-Options in increasing order of accuracy:
-
-| Source | How to obtain |
-|--------|---------------|
-| **Last recorded observation** | Use the most recent value in `rm_8_5_historical` |
-| **Estimated from Camp Polk** | Simple linear offset (RM 8.5 runs ~1–3 °C warmer than Camp Polk in summer) |
-| **Field measurement** | Manual spot reading if staff visit the site |
-| **Dummy / fixed value** | Acceptable for demonstration; flag outputs clearly |
-
-```r
+``` r
 # --- Option A: last known historical value ---
 rm85_last <- rm_8_5_historical |>
   filter(statistic == "max") |>
@@ -189,14 +197,15 @@ cat("Using RM 8.5 dadm_m1 =", dadm_m1, "°C\n")
 # dadm_m1 <- 17.2   # °C
 ```
 
----
+------------------------------------------------------------------------
 
 ## 4. Assemble the Feature Vector
 
-Gather today's Camp Polk lagged values and combine everything into a single
-named data frame that matches the column names expected by each model.
+Gather today's Camp Polk lagged values and combine everything into a
+single named data frame that matches the column names expected by each
+model.
 
-```r
+``` r
 # Today's Camp Polk values (row for Sys.Date())
 today <- Sys.Date()
 
@@ -249,15 +258,16 @@ features_7dadm <- tibble(
 )
 ```
 
-> **Column name check:** the RF models were trained with exact column names.
-> Run `names(features_tmax)` and compare against `rf_tmax$forest$xlevels` or
-> `names(importance(rf_tmax))` to confirm alignment before predicting.
+> **Column name check:** the RF models were trained with exact column
+> names. Run `names(features_tmax)` and compare against
+> `rf_tmax$forest$xlevels` or `names(importance(rf_tmax))` to confirm
+> alignment before predicting.
 
----
+------------------------------------------------------------------------
 
 ## 5. Load Models and Predict
 
-```r
+``` r
 rf_tmax  <- readRDS(tmax_model_path)
 rf_7dadm <- readRDS(dadm_model_path)
 
@@ -270,14 +280,15 @@ cat(sprintf(
 ))
 ```
 
----
+------------------------------------------------------------------------
 
 ## 6. Full Dummy Run — Self-Contained Example
 
-The block below is a complete, runnable demonstration using hardcoded dummy values
-so the pipeline can be tested before real-time RM 8.5 data are available.
+The block below is a complete, runnable demonstration using hardcoded
+dummy values so the pipeline can be tested before real-time RM 8.5 data
+are available.
 
-```r
+``` r
 library(tidyverse)
 library(lubridate)
 library(randomForest)
@@ -366,26 +377,26 @@ print(results)
 
 **Example output:**
 
-```
+```         
 # A tibble: 1 × 5
   forecast_date location               pred_tmax_C pred_7dadm_C rm85_lag_source
   <date>        <chr>                        <dbl>        <dbl> <chr>
 1 2026-07-15    RM 8.5 (Rimrock Ranch)        22.4         20.8 DUMMY — last historical obs
 ```
 
----
+------------------------------------------------------------------------
 
 ## 7. Regulatory Thresholds (Context)
 
 | Metric | Threshold | Significance |
-|--------|-----------|--------------|
-| 7DADM  | 17.8 °C   | Oregon DEQ temperature standard for salmon/steelhead rearing |
-| Tmax   | 20.0 °C   | Common alert threshold used in operations |
+|------------------|------------------------|------------------------------|
+| 7DADM | 17.8 °C | Oregon DEQ temperature standard for salmon/steelhead rearing |
+| 7DADM | 20.0 °C | Habitat Conservation Plan (HCP) threshold for RM 6 |
 
-Flagging predictions against these in the output table can make the forecast
-immediately actionable for operations staff.
+Flagging predictions against these in the output table can make the
+forecast immediately actionable for operations staff.
 
-```r
+``` r
 results <- results |>
   mutate(
     flag_7dadm = pred_7dadm_C > 17.8,
@@ -393,39 +404,35 @@ results <- results |>
   )
 ```
 
----
+------------------------------------------------------------------------
 
 ## 8. Transition Plan: Replacing Dummy RM 8.5 Data
 
-Once a real-time temperature sensor is operating at RM 8.5, replace the dummy
-lag values in Step 3 with a live pull. Depending on the sensor platform, options
-include:
+Once a real-time temperature sensor is operating at RM 8.5, replace the
+dummy lag values in Step 3 with a live pull. Depending on the sensor
+platform, options include:
 
-```r
+``` r
 # Option A — OWRD sensor installed at RM 8.5 (preferred)
-rm85_rt <- get_owrd_hydro(
-  station_nbr = "<rm85_station_id>",   # assign once registered with OWRD
+rm85_rt <- get_real_time_rm_85(
+  station_nbr = "<rm85_station_id>",   
   start_date  = Sys.Date() - 1,
   end_date    = Sys.Date() - 1,
-  data_source = "WTEMP_MAX"
+  data_source = "instantaneous_temperature"
 )
-Tmax_m1 <- rm85_rt |> pull(<value_column>)
 
-# Option B — internal logger (if logged to a file or database)
-Tmax_m1 <- read_csv("path/to/rm85_logger.csv") |>
-  filter(date == Sys.Date() - 1) |>
-  pull(tmax)
+Tmax_m1 <- rm85_rt |> pull(<value_column>)
 ```
 
-No other changes to the pipeline are needed — the feature names and model
-objects stay the same.
+No other changes to the pipeline are needed — the feature names and
+model objects stay the same.
 
----
+------------------------------------------------------------------------
 
 ## Summary of Predictor Sources
 
 | Predictor | Source | Function |
-|-----------|--------|----------|
+|---------------------------|--------------------|-------------------------|
 | `cp_flow_mean` | OWRD station 14076100 | `get_owrd_hydro(..., "MDF")` |
 | `cp_tmax` | OWRD station 14076100 | `get_owrd_hydro(..., "WTEMP_MAX")` |
 | `cp_7dadm` | Computed from `cp_tmax` | 7-day rolling mean |
