@@ -71,11 +71,13 @@ if (is.null(nws_tmax) || is.null(nws_tmin) || is.null(nws_cloud)) {
 }
 
 daily_nws <- function(df, target_date, agg_fn = mean) {
-  df |>
+  result <- df |>
     mutate(date = as.Date(datetime)) |>
     filter(date == target_date) |>
     summarise(value = agg_fn(value, na.rm = TRUE)) |>
     pull(value)
+  
+  if (length(result) == 0 || is.nan(result)) NA_real_ else result
 }
 
 # ── 3. RM 8.5 dummy lag (year == 2025 from rm_8_5_historical) ─────────────────
@@ -100,6 +102,8 @@ dadm_m1  <- if (nrow(rm85_lag_dadm) > 0) rm85_lag_dadm$temperature else NA_real_
 
 cat(sprintf("RM 8.5 lag (2025 dummy): Tmax_m1 = %.2f °C,  dadm_m1 = %.2f °C\n",
             Tmax_m1, dadm_m1))
+
+print(nws_tmax)
 
 # ── 4. Predict across all lead days ───────────────────────────────────────────
 results_list <- map(lead_days_vec, function(k) {
