@@ -6,7 +6,9 @@ library(zoo)
 library(here)
 library(whychusModel)
 
-today <- Sys.Date()
+# Since script runs at 7 pm PST, it is 3 am UTC and therefore "today" is set to the next day. 
+# Subtracting 1 makes it the actual day of the forecast. 
+today <- Sys.Date() - 1 
 cat(sprintf("Running RM 8.5 forecast for %s\n", today))
 
 # ── Config ────────────────────────────────────────────────────────────────────
