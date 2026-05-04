@@ -8,7 +8,8 @@ library(whychusModel)
 
 # Since script runs at 7 pm PST, it is 3 am UTC and therefore "today" is set to the next day. 
 # Subtracting 1 makes it the actual day of the forecast. 
-today <- Sys.Date() - 1 
+#today <- Sys.Date() - 1 
+today <- as.Date(Sys.time(), tz = "America/Los_Angeles")
 cat(sprintf("Running RM 8.5 forecast for %s\n", today))
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -17,7 +18,8 @@ owrd_station    <- "14076100"   # Camp Polk
 nws_gridpoint   <- "PDT/35,57" # RM 8.5 area near Sisters, OR
 threshold_tmax  <- 20.0         # HCP (°C)
 threshold_7dadm <- 17.8         # ODEQ (°C)
-log_file        <- here("output", "forecast-log.csv")
+temp_forecast_log_file <- here("output", "instream-forecast-log.csv")
+forecast_log    <- here("output", "nws-forecasts-log.csv")
 
 # ── 1. Camp Polk hydrology (OWRD) ─────────────────────────────────────────────
 pull_start <- today - 10
@@ -68,9 +70,55 @@ nws_tmin  <- tryCatch(get_nws_forecast(nws_gridpoint, "minTemperature"), error =
 nws_cloud <- tryCatch(get_nws_forecast(nws_gridpoint, "skyCover"),       error = function(e) NULL)
 
 if (is.null(nws_tmax) || is.null(nws_tmin) || is.null(nws_cloud)) {
-  message("Aborting: NWS data unavailable.")
-  quit(status = 1)
+  message("NWS API unavailable — falling back to nws-forecasts-log.csv")
+  
+  nws_log_file <- here("output", "nws-forecasts-log.csv")
+  
+  if (!file.exists(nws_log_file)) {
+    message("Aborting: NWS data unavailable and no forecast log found.")
+    quit(status = 1)
+  }
+  
+  nws_log <- read_csv(nws_log_file, show_col_types = FALSE) |>
+    mutate(
+      forecast_date = as.Date(forecast_date),
+      datetime      = as.POSIXct(forecast_date, tz = "America/Los_Angeles")
+    )
+  
+  # pull the most recent logged forecast for each variable/date combination
+  latest_run <- nws_log |>
+    filter(forecast_date >= today) |>
+    group_by(variable, forecast_date) |>
+    slice_max(run_date, n = 1) |>
+    ungroup()
+  
+  if (is.null(nws_tmax))
+    nws_tmax  <- latest_run |> filter(variable == "maxTemperature") |> select(datetime, value)
+  if (is.null(nws_tmin))
+    nws_tmin  <- latest_run |> filter(variable == "minTemperature") |> select(datetime, value)
+  if (is.null(nws_cloud))
+    nws_cloud <- latest_run |> filter(variable == "skyCover")       |> select(datetime, value)
+  
+  # final check — if any variable still has no rows, abort
+  if (nrow(nws_tmax) == 0 || nrow(nws_tmin) == 0 || nrow(nws_cloud) == 0) {
+    message("Aborting: fallback log missing one or more required variables.")
+    quit(status = 1)
+  }
+  
+  message("Fallback successful — using most recent logged NWS forecasts.")
 }
+
+all_forecasts <- bind_rows(
+  nws_tmax, 
+  nws_tmin, 
+  nws_cloud
+) |> 
+  mutate(
+    run_date     = today,
+    forecast_date = as.Date(datetime, tz = "America/Los_Angeles"),
+    lead_days    = as.integer(forecast_date - today)
+  ) |>
+  select(run_date, forecast_date, lead_days, variable, value) 
 
 daily_nws <- function(df, target_date, agg_fn = mean) {
   result <- df |>
@@ -186,13 +234,25 @@ results <- bind_rows(results_list) |>
 print(results, n = Inf)
 
 # ── 5. Append to cumulative log ────────────────────────────────────────────────
-if (file.exists(log_file)) {
-  existing <- read_csv(log_file, show_col_types = FALSE) |>
+if (file.exists(temp_forecast_log_file)) {
+  existing <- read_csv(temp_forecast_log_file, show_col_types = FALSE) |>
     filter(as.Date(run_date) != today)  # drop any prior run from today before re-appending
   updated <- bind_rows(existing, results)
 } else {
   updated <- results
 }
 
-write_csv(updated, log_file)
-cat(sprintf("Forecast log updated: %s (%d total rows)\n", log_file, nrow(updated)))
+write_csv(updated, temp_forecast_log_file)
+cat(sprintf("Instream Temp Forecast log updated: %s (%d total rows)\n", temp_forecast_log_file, nrow(updated)))
+
+# NWS: 
+if (file.exists(forecast_log)) {
+  existing_nws <- read_csv(forecast_log, show_col_types = FALSE) |>
+    filter(as.Date(run_date) != today)  # drop any prior run from today before re-appending
+  updated_nws <- bind_rows(existing_nws, all_forecasts)
+} else {
+  updated_nws <- all_forecasts
+}
+
+write_csv(updated_nws, forecast_log)
+cat(sprintf("NWS Forecast log updated: %s (%d total rows)\n", forecast_log, nrow(updated_nws)))
