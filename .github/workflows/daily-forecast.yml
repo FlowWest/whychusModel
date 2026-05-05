@@ -70,6 +70,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull
-          git add output/forecast-log.csv
+          git add output/instream-forecast-log.csv
+          git add output/nws-forecasts-log.csv
           git diff --staged --quiet || git commit -m "chore: forecast log $(date -u +%Y-%m-%d)"
           git push
