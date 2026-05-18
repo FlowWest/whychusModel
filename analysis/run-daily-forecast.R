@@ -20,6 +20,8 @@ threshold_tmax  <- 20.0         # HCP (°C)
 threshold_7dadm <- 17.8         # ODEQ (°C)
 temp_forecast_log_file <- here("output", "instream-forecast-log.csv")
 forecast_log    <- here("output", "nws-forecasts-log.csv")
+feat_tmax_log_file  <- here("output", "feat-tmax-log.csv")
+feat_7dadm_log_file <- here("output", "feat-7dadm-log.csv")
 
 # ── 1. Camp Polk hydrology (OWRD) ─────────────────────────────────────────────
 pull_start <- today - 10
@@ -53,6 +55,11 @@ cp_tmax <- cp_tmax_raw |>
 
 cp_7dadm <- cp_tmax |>
   mutate(cp_7dadm = rollmean(cp_tmax, k = 7, fill = NA, align = "right"))
+
+if (is.null(cp_7dadm) || is.null(cp_tmax)) {
+  message("Aborting: OWRD temperature data unavailable.")
+  quit(status = 1)
+}
 
 cp_today <- cp_flow |>
   filter(date == today) |>
@@ -154,9 +161,11 @@ cat(sprintf("RM 8.5 lag (2025 dummy): Tmax_m1 = %.2f °C,  dadm_m1 = %.2f °C\n"
             Tmax_m1, dadm_m1))
 
 print(nws_tmax)
+print(nws_cloud)
+print(nws_tmin)
 
-# ── 4. Predict across all lead days ───────────────────────────────────────────
-results_list <- map(lead_days_vec, function(k) {
+# ── 4a. Build features for all lead days ──────────────────────────────────────
+feat_list <- map(lead_days_vec, function(k) {
   fdate <- today + k
 
   air_max_k    <- daily_nws(nws_tmax,  fdate,     max)
@@ -193,6 +202,47 @@ results_list <- map(lead_days_vec, function(k) {
     dadm_m1      = dadm_m1
   )
 
+  list(k = k, fdate = fdate, feat_tmax = feat_tmax, feat_7dadm = feat_7dadm)
+})
+
+# ── 4b. Save NWS log and feature inputs (before RF models run) ────────────────
+if (file.exists(forecast_log)) {
+  existing_nws <- read_csv(forecast_log, show_col_types = FALSE) |>
+    filter(as.Date(run_date) != today)
+  updated_nws <- bind_rows(existing_nws, all_forecasts)
+} else {
+  updated_nws <- all_forecasts
+}
+write_csv(updated_nws, forecast_log)
+cat(sprintf("NWS Forecast log updated: %s (%d total rows)\n", forecast_log, nrow(updated_nws)))
+
+feat_tmax_rows <- map_dfr(feat_list, function(x)
+  cbind(run_date = as.character(today), forecast_date = as.character(x$fdate),
+        lead_days = x$k, x$feat_tmax))
+if (file.exists(feat_tmax_log_file)) {
+  existing_ft <- read_csv(feat_tmax_log_file, show_col_types = FALSE) |>
+    filter(as.Date(run_date) != today)
+  feat_tmax_rows <- bind_rows(existing_ft, feat_tmax_rows)
+}
+write_csv(feat_tmax_rows, feat_tmax_log_file)
+cat(sprintf("feat_tmax log updated: %s (%d total rows)\n", feat_tmax_log_file, nrow(feat_tmax_rows)))
+
+feat_7dadm_rows <- map_dfr(feat_list, function(x)
+  cbind(run_date = as.character(today), forecast_date = as.character(x$fdate),
+        lead_days = x$k, x$feat_7dadm))
+if (file.exists(feat_7dadm_log_file)) {
+  existing_fd <- read_csv(feat_7dadm_log_file, show_col_types = FALSE) |>
+    filter(as.Date(run_date) != today)
+  feat_7dadm_rows <- bind_rows(existing_fd, feat_7dadm_rows)
+}
+write_csv(feat_7dadm_rows, feat_7dadm_log_file)
+cat(sprintf("feat_7dadm log updated: %s (%d total rows)\n", feat_7dadm_log_file, nrow(feat_7dadm_rows)))
+
+# ── 4c. Predict across all lead days ──────────────────────────────────────────
+results_list <- map(feat_list, function(x) {
+  k     <- x$k
+  fdate <- x$fdate
+
   rf_tmax  <- readRDS(here("output", paste0("rm85_rf_tmax_lead",  k, ".rds")))
   rf_7dadm <- readRDS(here("output", paste0("rm85_rf_7dadm_lead", k, ".rds")))
 
@@ -215,8 +265,8 @@ results_list <- map(lead_days_vec, function(k) {
     run_date       = today,
     forecast_date  = fdate,
     lead_days      = k,
-    pred_tmax_C    = round(predict(rf_tmax,  feat_tmax),  2),
-    pred_7dadm_C   = round(predict(rf_7dadm, feat_7dadm), 2),
+    pred_tmax_C    = round(predict(rf_tmax,  x$feat_tmax),  2),
+    pred_7dadm_C   = round(predict(rf_7dadm, x$feat_7dadm), 2),
     actual_tmax_C  = if (length(actual_tmax) > 0) actual_tmax[[1]] else NA_real_,
     actual_7dadm_C = if (length(actual_dadm) > 0) actual_dadm[[1]] else NA_real_,
     note = "dummy data"
@@ -233,10 +283,10 @@ results <- bind_rows(results_list) |>
 
 print(results, n = Inf)
 
-# ── 5. Append to cumulative log ────────────────────────────────────────────────
+# ── 5. Append instream forecast to cumulative log ─────────────────────────────
 if (file.exists(temp_forecast_log_file)) {
   existing <- read_csv(temp_forecast_log_file, show_col_types = FALSE) |>
-    filter(as.Date(run_date) != today)  # drop any prior run from today before re-appending
+    filter(as.Date(run_date) != today)
   updated <- bind_rows(existing, results)
 } else {
   updated <- results
@@ -244,15 +294,3 @@ if (file.exists(temp_forecast_log_file)) {
 
 write_csv(updated, temp_forecast_log_file)
 cat(sprintf("Instream Temp Forecast log updated: %s (%d total rows)\n", temp_forecast_log_file, nrow(updated)))
-
-# NWS: 
-if (file.exists(forecast_log)) {
-  existing_nws <- read_csv(forecast_log, show_col_types = FALSE) |>
-    filter(as.Date(run_date) != today)  # drop any prior run from today before re-appending
-  updated_nws <- bind_rows(existing_nws, all_forecasts)
-} else {
-  updated_nws <- all_forecasts
-}
-
-write_csv(updated_nws, forecast_log)
-cat(sprintf("NWS Forecast log updated: %s (%d total rows)\n", forecast_log, nrow(updated_nws)))

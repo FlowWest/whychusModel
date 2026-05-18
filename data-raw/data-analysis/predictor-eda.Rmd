@@ -36,17 +36,15 @@ forecasts_wide <- all_historical_forecasts |>
   )
 
 # Pull observed water temp — max and mean (Camp Polk)
-obs_wide <- camp_polk_historical |>
-  filter(variable == "water temperature (c)") |>
+obs_wide <- camp_polk_temperature_historical |>
   filter(statistic %in% c("max", "mean")) |>
-  select(date, statistic, value) |>
-  pivot_wider(names_from = statistic, values_from = value) |>
+  select(date, statistic, temperature) |>
+  pivot_wider(names_from = statistic, values_from = temperature) |>
   rename(twater_max = max, twater_mean = mean)
 
 # Pull observed flow (Camp Polk)
-obs_flow <- camp_polk_historical |>
-  filter(variable == "discharge (cfs)") |>
-  select(date, Q = value)
+obs_flow <- camp_polk_flow_historical |>
+  select(date, Q = flow_cfs)
 
 # Join everything
 df <- obs_wide |>
@@ -483,10 +481,10 @@ rm6_flow |>
 
 ```{r sisters-prep}
 # Max daily water temperature (May–Sep)
-cp_temp_gage <- camp_polk_historical |>
-  filter(variable == "water temperature (c)", statistic == "max",
+cp_temp_gage <- camp_polk_temperature_historical |>
+  filter(statistic == "max",
          month(date) >= 5, month(date) <= 9) |>
-  select(date, cp_temp = value)
+  select(date, cp_temp = temperature)
 
 nr_temp_gage <- whychus_nr_sisters_historical |>
   filter(variable == "water temperature (c)", statistic == "max",
@@ -494,10 +492,10 @@ nr_temp_gage <- whychus_nr_sisters_historical |>
   select(date, nr_temp = value)
 
 # Mean daily flow (May–Sep)
-cp_flow_gage <- camp_polk_historical |>
-  filter(variable == "discharge (cfs)", statistic == "mean",
+cp_flow_gage <- camp_polk_flow_historical |>
+  filter(statistic == "mean",
          month(date) >= 5, month(date) <= 9) |>
-  select(date, cp_flow = value)
+  select(date, cp_flow = flow_cfs)
 
 nr_flow_gage <- whychus_nr_sisters_historical |>
   filter(variable == "discharge (cfs)", statistic == "mean",
@@ -592,7 +590,69 @@ gap_df |>
                    breaks = c(-Inf, 0, 0.25, 0.5, 0.75, 1),
                    labels = c("No data", "1–25%", "26–50%", "51–75%", "76–100%"),
                    include.lowest = TRUE)
+  ) |> 
+  filter(type == "Temperature") |> 
+  ggplot(aes(x = month, y = gage, fill = coverage)) +
+  geom_tile(height = 0.8, color = "white", linewidth = 0.4) +
+  scale_fill_manual(
+    values = c(
+      "No data"  = "#D9D9D9",
+      "1–25%"    = "#E8A598",
+      "26–50%"   = "#F0C27F",
+      "51–75%"   = "#A8C5A0",
+      "76–100%"  = "#4E8B6F"
+    ),
+    name = "Days with data",
+    drop = FALSE
+  ) +
+  facet_grid(year ~ type, switch = "y") +
+  labs(x = NULL, y = NULL,
+       title = "Data availability by gage and year") +
+  theme_minimal(base_size = 9) +
+  theme(
+    legend.position  = "bottom",
+    legend.key.width = unit(0.8, "cm"),
+    panel.grid       = element_blank(),
+    axis.text.x      = element_text(size = 8),
+    axis.text.y      = element_text(size = 8),
+    strip.text.x     = element_text(size = 10, face = "plain"),
+    strip.text.y     = element_text(size = 8),
+    strip.placement  = "outside",
+    panel.spacing    = unit(0.3, "lines")
+  )
+
+gap_df |>
+  select(date,
+         `Camp Polk Temp`  = cp_temp,
+         `Nr Sisters Temp` = nr_temp,
+         `Camp Polk Flow`  = cp_flow,
+         `Nr Sisters Flow` = nr_flow,
+         `At Sisters Flow` = at_flow) |>
+  pivot_longer(-date, names_to = "gage", values_to = "value") |>
+  mutate(
+    has_data      = !is.na(value),
+    year          = factor(year(date)),
+    month         = month(date, label = TRUE, abbr = TRUE),
+    days_in_month = days_in_month(date),
+    type          = if_else(str_detect(gage, "Temp"), "Temperature", "Flow"),
+    gage          = factor(gage, levels = c("Camp Polk Temp", "Nr Sisters Temp",
+                                            "At Sisters Flow", "Nr Sisters Flow",
+                                            "Camp Polk Flow"))
   ) |>
+  group_by(type, year, month, gage) |>
+  summarise(
+    days_present  = sum(has_data),
+    days_in_month = first(days_in_month),
+    pct_present   = days_present / days_in_month,
+    .groups = "drop"
+  ) |>
+  mutate(
+    coverage = cut(pct_present,
+                   breaks = c(-Inf, 0, 0.25, 0.5, 0.75, 1),
+                   labels = c("No data", "1–25%", "26–50%", "51–75%", "76–100%"),
+                   include.lowest = TRUE)
+  ) |> 
+  filter(type == "Flow") |> 
   ggplot(aes(x = month, y = gage, fill = coverage)) +
   geom_tile(height = 0.8, color = "white", linewidth = 0.4) +
   scale_fill_manual(
