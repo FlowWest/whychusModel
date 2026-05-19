@@ -160,6 +160,10 @@ dadm_m1  <- if (nrow(rm85_lag_dadm) > 0) rm85_lag_dadm$temperature else NA_real_
 cat(sprintf("RM 8.5 lag (2025 dummy): Tmax_m1 = %.2f °C,  dadm_m1 = %.2f °C\n",
             Tmax_m1, dadm_m1))
 
+print(any(is.na(nws_tmax$value)))
+print(any(is.na(nws_cloud$value)))
+print(any(is.na(nws_tmin$value)))
+
 print(nws_tmax)
 print(nws_cloud)
 print(nws_tmin)

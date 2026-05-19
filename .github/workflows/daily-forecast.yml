@@ -66,11 +66,15 @@ jobs:
         run: Rscript analysis/run-daily-forecast.R
 
       - name: Commit and push forecast log
+        if: always()   
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull
           git add output/instream-forecast-log.csv
+          git add output/nws-forecasts-log.csv
+          git add output/feat-tmax-log.csv
+          git add output/feat-7dadm-log.csv
           git add output/nws-forecasts-log.csv
           git diff --staged --quiet || git commit -m "chore: forecast log $(date -u +%Y-%m-%d)"
           git push
