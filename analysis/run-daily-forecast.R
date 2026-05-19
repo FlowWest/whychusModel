@@ -127,14 +127,49 @@ all_forecasts <- bind_rows(
   ) |>
   select(run_date, forecast_date, lead_days, variable, value) 
 
-daily_nws <- function(df, target_date, agg_fn = mean) {
+# ── 2b. Load NWS log early for fallback ──────────────────────────────────────
+nws_log_fallback <- if (file.exists(forecast_log)) {
+  read_csv(forecast_log, show_col_types = FALSE) |>
+    mutate(
+      forecast_date = as.Date(forecast_date),
+      datetime      = as.POSIXct(forecast_date, tz = "America/Los_Angeles")
+    )
+} else {
+  NULL
+}
+
+make_fallback_df <- function(variable_name) {
+  if (is.null(nws_log_fallback)) return(NULL)
+  nws_log_fallback |>
+    filter(variable == variable_name) |>
+    group_by(forecast_date) |>
+    slice_max(run_date, n = 1) |>
+    ungroup() |>
+    select(datetime, value)
+}
+
+daily_nws <- function(df, target_date, agg_fn = mean, fallback_df = NULL) {
   result <- df |>
     mutate(date = as.Date(datetime)) |>
     filter(date == target_date) |>
     summarise(value = agg_fn(value, na.rm = TRUE)) |>
     pull(value)
   
-  if (length(result) == 0 || is.nan(result)) NA_real_ else result
+  if (length(result) == 0 || is.nan(result)) {
+    if (!is.null(fallback_df)) {
+      result <- fallback_df |>
+        mutate(date = as.Date(datetime)) |>
+        filter(date == target_date) |> View()
+        summarise(value = agg_fn(value, na.rm = TRUE)) |>
+        pull(value)
+      if (length(result) > 0 && !is.nan(result)) {
+        message(sprintf("  [fallback] Used log for date %s", target_date))
+        return(result)
+      }
+    }
+    return(NA_real_)
+  }
+  result
 }
 
 # ── 3. RM 8.5 dummy lag (year == 2025 from rm_8_5_historical) ─────────────────
@@ -170,13 +205,17 @@ print(nws_tmin)
 
 # ── 4a. Build features for all lead days ──────────────────────────────────────
 feat_list <- map(lead_days_vec, function(k) {
-  fdate <- today + k
-
-  air_max_k    <- daily_nws(nws_tmax,  fdate,     max)
-  air_min_k    <- daily_nws(nws_tmin,  fdate,     min)
-  cloud_k      <- daily_nws(nws_cloud, fdate,     mean)
-  air_max_m1_k <- daily_nws(nws_tmax,  fdate - 1, max)
-  air_min_m1_k <- daily_nws(nws_tmin,  fdate - 1, min)
+    fdate <- today + k
+    
+    fb_tmax  <- make_fallback_df("maxTemperature")
+    fb_tmin  <- make_fallback_df("minTemperature")
+    fb_cloud <- make_fallback_df("skyCover")
+    
+    air_max_k    <- daily_nws(nws_tmax,  fdate,     max,  fb_tmax)
+    air_min_k    <- daily_nws(nws_tmin,  fdate,     min,  fb_tmin)
+    cloud_k      <- daily_nws(nws_cloud, fdate,     mean, fb_cloud)
+    air_max_m1_k <- daily_nws(nws_tmax,  fdate - 1, max,  fb_tmax)   
+    air_min_m1_k <- daily_nws(nws_tmin,  fdate - 1, min,  fb_tmin)   
 
   feat_tmax <- data.frame(
     cp_flow_mean = cp_today$cp_flow_mean,
