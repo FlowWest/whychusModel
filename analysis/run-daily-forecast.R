@@ -260,22 +260,28 @@ write_csv(updated_nws, forecast_log)
 cat(sprintf("NWS Forecast log updated: %s (%d total rows)\n", forecast_log, nrow(updated_nws)))
 
 feat_tmax_rows <- map_dfr(feat_list, function(x)
-  cbind(run_date = as.character(today), forecast_date = as.character(x$fdate),
-        lead_days = x$k, x$feat_tmax))
+  bind_cols(
+    tibble(run_date = today, forecast_date = x$fdate, lead_days = x$k),
+    x$feat_tmax
+  ))
 if (file.exists(feat_tmax_log_file)) {
   existing_ft <- read_csv(feat_tmax_log_file, show_col_types = FALSE) |>
-    filter(as.Date(run_date) != today)
+    mutate(run_date = as.Date(run_date), forecast_date = as.Date(forecast_date)) |>
+    filter(run_date != today)
   feat_tmax_rows <- bind_rows(existing_ft, feat_tmax_rows)
 }
 write_csv(feat_tmax_rows, feat_tmax_log_file)
 cat(sprintf("feat_tmax log updated: %s (%d total rows)\n", feat_tmax_log_file, nrow(feat_tmax_rows)))
 
 feat_7dadm_rows <- map_dfr(feat_list, function(x)
-  cbind(run_date = as.character(today), forecast_date = as.character(x$fdate),
-        lead_days = x$k, x$feat_7dadm))
+  bind_cols(
+    tibble(run_date = today, forecast_date = x$fdate, lead_days = x$k),
+    x$feat_7dadm
+  ))
 if (file.exists(feat_7dadm_log_file)) {
   existing_fd <- read_csv(feat_7dadm_log_file, show_col_types = FALSE) |>
-    filter(as.Date(run_date) != today)
+    mutate(run_date = as.Date(run_date), forecast_date = as.Date(forecast_date)) |>
+    filter(run_date != today)
   feat_7dadm_rows <- bind_rows(existing_fd, feat_7dadm_rows)
 }
 write_csv(feat_7dadm_rows, feat_7dadm_log_file)
@@ -337,3 +343,4 @@ if (file.exists(temp_forecast_log_file)) {
 
 write_csv(updated, temp_forecast_log_file)
 cat(sprintf("Instream Temp Forecast log updated: %s (%d total rows)\n", temp_forecast_log_file, nrow(updated)))
+
