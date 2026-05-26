@@ -156,10 +156,11 @@ daily_nws <- function(df, target_date, agg_fn = mean, fallback_df = NULL) {
     pull(value)
   
   if (length(result) == 0 || is.nan(result)) {
+    message("attempting use of fallback df... ")
     if (!is.null(fallback_df)) {
       result <- fallback_df |>
         mutate(date = as.Date(datetime)) |>
-        filter(date == target_date) |> View()
+        filter(date == target_date) |> 
         summarise(value = agg_fn(value, na.rm = TRUE)) |>
         pull(value)
       if (length(result) > 0 && !is.nan(result)) {
