@@ -1,0 +1,499 @@
+---
+title: "Camp Polk Flow Duration Analysis"
+subtitle: "How much flow is needed at Camp Polk, and for how long, to keep RM 8.5 7DADM below 20°C?"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    fig_width: 9
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+library(tidyverse)
+library(lubridate)
+library(zoo)
+library(dataRetrieval)
+library(whychusModel)
+library(here)
+library(randomForest)
+
+```
+
+---
+
+## Background
+
+This analysis starts with a concrete problem: a specific moment in the observed record when
+the 7-day average daily maximum temperature (7DADM) at RM 8.5 crossed the 20°C HCP
+standard. Starting from that event, the analysis works backward to answer two operational
+questions:
+
+> **Q1: How long does a flow pulse at Camp Polk take to affect temperature at RM 8.5?**
+
+> **Q2: How many hours does Camp Polk flow need to stay above a given threshold to keep
+> the 7DADM at RM 8.5 below the 20°C HCP standard?**
+
+Both questions are answered **empirically** from observed sub-daily data. The approach is
+correlational, not causal — it describes what has historically tended to happen, which
+provides a practical operating target while a more mechanistic model is developed.
+
+---
+
+## Settings
+
+```{r settings}
+owrd_station   <- "14076100"      # Camp Polk OWRD gauge
+target_C       <- 20.0            # HCP 7DADM threshold (°C)
+analysis_start <- as.Date("2025-06-01")   # start of analysis window
+analysis_end   <- as.Date("2025-09-30")   # end of analysis window
+max_lag_hours  <- 72              # CCF search window (hours)
+```
+
+---
+
+## 1. Data
+
+Three time series are used:
+
+| Series | Resolution | Source |
+|--------|-----------|--------|
+| Camp Polk instantaneous flow | 15-min | OWRD `r owrd_station` |
+| Camp Polk water temperature | 15-min | OWRD `r owrd_station` |
+| RM 8.5 water temperature | 1-hour | OWRD (RM 8.5 station) |
+
+```{r load-data}
+cp_flow_15 <- tryCatch(
+  get_owrd_hydro(owrd_station, analysis_start, analysis_end, "Instantaneous_Flow"),
+  error = function(e) { message("Flow pull failed: ", e$message); NULL }
+)
+
+cp_temp_15 <- tryCatch(
+  get_owrd_hydro(owrd_station, analysis_start, analysis_end, "WTEMP15"),
+  error = function(e) { message("Camp Polk temp pull failed: ", e$message); NULL }
+)
+
+load("~/Documents/git/udwc_temperature/data/all_rm_8_5_dates_and_times.rda")
+rm85_hourly <- all_rm_8_5_dates_and_times
+```
+
+```{r parse-align}
+cp_flow_clean <- cp_flow_15 |>
+  mutate(
+    datetime = parse_date_time(record_date, orders = c("mdy HM", "mdy")),
+    flow_cfs = instananteous_flow_cfs
+  ) |>
+  filter(!is.na(datetime), !is.na(flow_cfs)) |>
+  select(datetime, flow_cfs) |>
+  arrange(datetime)
+
+rm85_clean <- rm85_hourly |>
+  mutate(datetime = date,
+         temp_c   = temperature) |>
+  filter(!is.na(datetime), !is.na(temp_c)) |>
+  select(datetime, temp_c) |>
+  arrange(datetime)
+
+# Snap Camp Polk 15-min flow to nearest hour for alignment with RM 8.5
+cp_flow_hourly <- cp_flow_clean |>
+  mutate(datetime_hr = floor_date(datetime, "hour")) |>
+  group_by(datetime_hr) |>
+  summarise(flow_cfs = mean(flow_cfs, na.rm = TRUE), .groups = "drop") |>
+  rename(datetime = datetime_hr)
+
+# Inner join — only hours where both series have data
+hourly <- cp_flow_hourly |>
+  inner_join(rm85_clean, by = "datetime") |>
+  arrange(datetime)
+```
+
+The Camp Polk 15-minute flow is averaged to hourly to align with the RM 8.5 temperature
+record. After joining, there are **`r nrow(hourly)` matched hourly observations** spanning
+`r format(min(hourly$datetime), "%B %d, %Y")` to `r format(max(hourly$datetime), "%B %d, %Y")`.
+
+---
+
+## 2. Motivating Event — A Specific 7DADM Exceedance
+
+### Computing 7DADM and identifying the anchor event
+
+```{r anchor-event}
+# Daily 7DADM at RM 8.5 — compute once here, reuse throughout
+rm85_daily_max <- rm85_clean |>
+  mutate(date = as.Date(datetime)) |>
+  group_by(date) |>
+  summarise(tmax = max(temp_c, na.rm = TRUE), .groups = "drop") |>
+  arrange(date) |>
+  mutate(dadm_7 = rollmean(tmax, k = 7, fill = NA, align = "right")) |> 
+  filter(date >= analysis_start & date <= analysis_end)
+
+# Identify the peak 7DADM exceedance as the anchor event
+anchor_row <- rm85_daily_max |>
+  filter(dadm_7 > target_C) |> 
+  slice_max(dadm_7, n = 1)
+
+anchor_date  <- anchor_row$date
+anchor_dadm  <- round(anchor_row$dadm_7, 1)
+anchor_year  <- year(anchor_date)
+
+# Define a display window: the warm season containing the anchor event
+window_start <- as.Date(sprintf("%d-06-01", anchor_year))
+window_end   <- as.Date(sprintf("%d-09-30", anchor_year))
+```
+
+The peak recorded 7DADM in the analysis window occurred on
+**`r format(anchor_date, "%B %d, %Y")`**, when it reached **`r anchor_dadm`°C** —
+`r round(anchor_dadm - target_C, 1)`°C above the 20°C HCP standard.
+
+This event anchors the rest of the analysis. Every question below — about lag time and
+required flow duration — is framed by asking: *what would have needed to happen at Camp
+Polk in the days before `r format(anchor_date, "%B %d")` to keep 7DADM below 20°C?*
+
+### The exceedance in context
+
+```{r anchor-plot, fig.cap="**Figure 1.** Daily maximum temperature and 7DADM at RM 8.5 over the warm season containing the anchor event. The dashed red line marks the 20°C HCP standard. The shaded band highlights the 7-day window whose average produces the anchor-event 7DADM — the temperature signal that was building in the week before the exceedance. Blue bars show Camp Polk mean daily flow (right axis)."}
+# The 7-day window whose mean equals the anchor 7DADM
+band_start <- anchor_date - 6
+band_end   <- anchor_date
+
+cp_flow_window <- camp_polk_flow_historical |>
+  filter(statistic == "mean", date >= window_start, date <= window_end)
+
+# Scale factor to map flow (cfs) onto the temperature axis
+flow_scale <- max(cp_flow_window$flow_cfs, na.rm = TRUE) / max(rm85_daily_max$tmax, na.rm = TRUE)
+
+rm85_daily_max |>
+  filter(date >= window_start, date <= window_end) |>
+  ggplot(aes(x = date)) +
+  annotate(
+    "rect",
+    xmin = band_start, xmax = band_end,
+    ymin = -Inf, ymax = Inf,
+    fill = "#c0392b", alpha = 0.08
+  ) +
+  geom_col(
+    data = cp_flow_window,
+    aes(x = date, y = flow_cfs / flow_scale),
+    fill = "#2c7bb6", alpha = 0.35, width = 1
+  ) +
+  geom_line(aes(y = tmax),  color = "#7f8c8d", linewidth = 0.6, alpha = 0.7) +
+  geom_line(aes(y = dadm_7), color = "#e67e22", linewidth = 1.1) +
+  geom_hline(
+    yintercept = target_C, linetype = "dashed",
+    color = "#c0392b", linewidth = 0.8
+  ) +
+  annotate(
+    "point",
+    x = anchor_date, y = anchor_dadm,
+    shape = 21, size = 4, fill = "#c0392b", color = "white", stroke = 1.5
+  ) +
+  annotate(
+    "text",
+    x = anchor_date + 1, y = anchor_dadm + 0.3,
+    label = sprintf("%s\n7DADM = %.1f°C",
+                    format(anchor_date, "%b %d"), anchor_dadm),
+    hjust = 0, color = "#c0392b", size = 3.2
+  ) +
+  scale_y_continuous(
+    name     = "Temperature (°C)",
+    sec.axis = sec_axis(~ . * flow_scale, name = "Camp Polk flow (cfs)",
+                        labels = scales::comma)
+  ) +
+  labs(
+    title    = sprintf("RM 8.5 temperature & Camp Polk flow — %d warm season", anchor_year),
+    subtitle = "Grey = daily max  |  Orange = 7DADM  |  Blue bars = mean daily flow",
+    x        = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor       = element_blank(),
+    axis.title.y.right     = element_text(color = "#2c7bb6"),
+    axis.text.y.right      = element_text(color = "#2c7bb6")
+  )
+```
+
+---
+
+## 3. RF Model Flow Sweep — What flow would have changed the outcome?
+
+The empirical analysis above describes historical patterns across the full record.
+This section zooms in on the anchor event itself, applying the same Random Forest
+models used in the operational daily forecast (`run-daily-forecast.R`) to ask a
+counterfactual: **given the atmospheric and temperature conditions in the days
+before the anchor event, what Camp Polk flow would have held RM 8.5 7DADM at or
+below `r target_C`°C?**
+
+For each forecast lead (1, 3, and 7 days), all non-flow features are fixed at
+their historical values for the corresponding run date (`anchor_date − k`).
+`cp_flow_mean` and `cp_flow_m1` are swept together across the observed flow range,
+representing a scenario where flow is managed at a sustained level for at least
+two consecutive days. The crossing point at `r target_C`°C is the estimated
+minimum sustained flow needed to prevent exceedance.
+
+```{r rf-sweep-prep}
+lead_days_vec <- c(1, 3, 7)
+model_dir     <- here("output")
+
+# Best-available weather for a given valid_date — average across all
+# available issue dates (reasonable proxy for observed conditions)
+get_wx <- function(d, var, fn = mean) {
+  v <- all_historical_forecasts |>
+    filter(valid_date == d, variable == var) |>
+    summarise(out = fn(value, na.rm = TRUE)) |>
+    pull(out)
+  if (length(v) == 0 || is.nan(v)) NA_real_ else v
+}
+
+first_val <- function(x) if (length(x) > 0) x[[1]] else NA_real_
+
+# RM 8.5 7DADM over full date range (unfiltered — needed for dates before analysis window)
+rm85_dadm_all <- rm85_clean |>
+  mutate(date = as.Date(datetime)) |>
+  group_by(date) |>
+  summarise(tmax = max(temp_c, na.rm = TRUE), .groups = "drop") |>
+  arrange(date) |>
+  mutate(dadm_7 = rollmean(tmax, k = 7, fill = NA, align = "right"))
+
+# Build base feature row for each lead day (everything except cp_flow_mean / cp_flow_m1)
+base_feats <- map(lead_days_vec, function(k) {
+  run_date <- anchor_date - k
+  fdate    <- anchor_date
+  list(
+    k           = k,
+    run_date    = run_date,
+    obs_flow    = first_val(camp_polk_flow_historical |>
+                    filter(statistic == "mean", date == run_date) |> pull(flow_cfs)),
+    cp_7dadm    = first_val(camp_polk_temperature_historical |>
+                    filter(statistic == "7DADM", date == run_date) |> pull(temperature)),
+    Julian      = yday(fdate),
+    air_max     = get_wx(fdate,     "temperature_2m_max", max),
+    air_min     = get_wx(fdate,     "temperature_2m_min", min),
+    cloud_pct   = get_wx(fdate,     "cloud_cover_mean",   mean),
+    cp_7dadm_m1 = first_val(camp_polk_temperature_historical |>
+                    filter(statistic == "7DADM", date == run_date - 1) |> pull(temperature)),
+    air_max_m1  = get_wx(fdate - 1, "temperature_2m_max", max),
+    air_min_m1  = get_wx(fdate - 1, "temperature_2m_min", min),
+    dadm_m1     = first_val(rm85_dadm_all |>
+                    filter(date == run_date - 1) |> pull(dadm_7))
+  )
+})
+```
+
+```{r rf-sweep-run}
+flow_range <- quantile(camp_polk_flow_historical$flow_cfs, c(0.05, 0.95), na.rm = TRUE)
+flow_grid  <- seq(flow_range[1], flow_range[2], length.out = 300)
+
+sweep_df <- map_dfr(base_feats, function(bf) {
+  rf <- readRDS(file.path(model_dir, sprintf("rm85_rf_7dadm_lead%d.rds", bf$k)))
+
+  map_dfr(flow_grid, function(q) {
+    feat <- data.frame(
+      cp_flow_mean = q,
+      cp_7dadm     = bf$cp_7dadm,
+      Julian       = bf$Julian,
+      air_max      = bf$air_max,
+      air_min      = bf$air_min,
+      cloud_pct    = bf$cloud_pct,
+      cp_flow_m1   = q,          # swept together: sustained flow scenario
+      cp_7dadm_m1  = bf$cp_7dadm_m1,
+      air_max_m1   = bf$air_max_m1,
+      air_min_m1   = bf$air_min_m1,
+      dadm_m1      = bf$dadm_m1
+    )
+    tibble(
+      lead_days  = bf$k,
+      run_date   = bf$run_date,
+      obs_flow   = bf$obs_flow,
+      flow_cfs   = q,
+      pred_7dadm = as.numeric(predict(rf, newdata = feat))
+    )
+  })
+})
+
+# For each lead: find threshold flow (crosses target) or best-achievable flow (doesn't)
+threshold_df <- sweep_df |>
+  group_by(lead_days) |>
+  mutate(crosses = any(pred_7dadm <= target_C)) |>
+  filter(if_else(crosses, pred_7dadm <= target_C, pred_7dadm == min(pred_7dadm))) |>
+  slice_min(flow_cfs, n = 1) |>
+  ungroup() |>
+  mutate(flow_gap = round(flow_cfs - obs_flow))
+
+# Predicted 7DADM at the observed flow for each lead
+obs_pred_df <- sweep_df |>
+  group_by(lead_days) |>
+  slice_min(abs(flow_cfs - obs_flow), n = 1) |>
+  ungroup()
+```
+
+```{r rf-sweep-plot, fig.cap="**Figure 2.** Predicted RM 8.5 7DADM as a function of sustained Camp Polk flow for each forecast lead, with all non-flow features fixed at historical values for the anchor event. Dashed red line = 20°C HCP threshold. Vertical dotted lines = minimum sustained flow to reach threshold (shown only when achievable). Filled circles = model prediction at observed flow on each run date."}
+lead_colors <- c("1" = "#D4A853", "3" = "#C07038", "7" = "#185FA5")
+lead_labels <- c("1" = "1-day lead", "3" = "3-day lead", "7" = "7-day lead")
+
+threshold_crossings <- filter(threshold_df, crosses)
+
+ggplot(sweep_df, aes(x = flow_cfs, y = pred_7dadm,
+                     color = factor(lead_days), group = factor(lead_days))) +
+  geom_line(linewidth = 1.1) +
+  geom_hline(yintercept = target_C, linetype = "dashed",
+             color = "#c0392b", linewidth = 0.8) +
+  annotate("text", x = flow_range[[1]] + 2, y = target_C + 0.15,
+           label = paste0(target_C, "°C HCP threshold"),
+           hjust = 0, color = "#c0392b", size = 3.2) +
+  { if (nrow(threshold_crossings) > 0) list(
+      geom_vline(data = threshold_crossings,
+                 aes(xintercept = flow_cfs, color = factor(lead_days)),
+                 linetype = "dotted", linewidth = 0.8, show.legend = FALSE),
+      geom_label(data = threshold_crossings,
+                 aes(x = flow_cfs, y = target_C - 0.45,
+                     label = sprintf("%.0f cfs", flow_cfs),
+                     color = factor(lead_days)),
+                 size = 3, show.legend = FALSE, label.padding = unit(0.15, "lines"))
+  )} +
+  geom_point(data = obs_pred_df,
+             aes(x = flow_cfs, y = pred_7dadm, color = factor(lead_days)),
+             size = 3.5, shape = 16) +
+  { if (nrow(threshold_crossings) == 0)
+      annotate("text", x = mean(flow_range), y = target_C - 0.5,
+               label = "Threshold not achievable within observed flow range\n(atmospheric driver dominates)",
+               hjust = 0.5, color = "grey40", size = 3.2, fontface = "italic")
+  } +
+  scale_color_manual(values = lead_colors, labels = lead_labels, name = NULL) +
+  scale_x_continuous(labels = scales::comma) +
+  labs(
+    title    = sprintf("RF flow sweep — anchor event %s", format(anchor_date, "%b %d, %Y")),
+    subtitle = "cp_flow_mean and cp_flow_m1 swept together (sustained 2-day flow scenario)",
+    x        = "Camp Polk sustained flow (cfs)",
+    y        = "Predicted 7DADM at RM 8.5 (°C)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        legend.position  = "bottom")
+```
+
+```{r rf-sweep-table, echo=FALSE}
+threshold_df |>
+  transmute(
+    `Lead (days)`            = lead_days,
+    `Run date`               = format(run_date, "%b %d"),
+    `Observed flow (cfs)`    = round(obs_flow),
+    `Flow at min pred (cfs)` = round(flow_cfs),
+    `Min predicted 7DADM (°C)` = round(pred_7dadm, 2),
+    `Reaches threshold`      = if_else(crosses, "Yes", "No — atm. driver")
+  ) |>
+  knitr::kable(
+    caption = sprintf(
+      "Table 1. For each forecast lead day: the Camp Polk flow that minimizes predicted RM 8.5 7DADM, and whether that minimum reaches the %.1f°C HCP threshold. 'Run date' is the day the flow action would need to begin.",
+      target_C
+    )
+  )
+```
+
+**How to read this:**
+
+- Each curve shows what the RF model predicts for RM 8.5 7DADM across a range of
+  Camp Polk flows, with all other drivers (air temperature, cloud cover, prior
+  temperature conditions) held fixed at their anchor-event values.
+- The **filled circle** on each curve is the predicted outcome at the flow that
+  actually occurred — the counterfactual baseline for that lead day.
+- Where a curve does not cross `r target_C`°C anywhere in the flow range, the
+  dominant driver was atmospheric, not hydrologic. More flow cannot overcome
+  the heat load in that scenario.
+- Earlier action (7-day lead) uses less certain atmospheric inputs but leaves
+  more time to ramp flow; later action (1-day lead) reflects near-actual
+  conditions but leaves little response time.
+
+---
+
+## 4. What if flow had been changed up to 7 days prior?
+
+The RF sweep above shows predictions at fixed lead times (1, 3, and 7 days before
+the anchor event). A natural operational follow-on is: **does acting earlier — up
+to a full week in advance — meaningfully reduce the required flow?**
+
+The models available here cover leads of 1, 3, and 7 days, so the answer can be
+read directly from the sweep curves and table above:
+
+```{r prior-flow-summary, echo=FALSE}
+prior_summary <- threshold_df |>
+  transmute(
+    `Days prior to exceedance` = lead_days,
+    `Action date`              = format(run_date, "%b %d, %Y"),
+    `Min predicted 7DADM (°C)` = round(pred_7dadm, 2),
+    `Flow achieving that (cfs)` = round(flow_cfs),
+    `Change from observed (cfs)` = flow_gap,
+    `Threshold reachable`       = if_else(crosses, "Yes", "No — atm. driver")
+  )
+
+knitr::kable(
+  prior_summary,
+  caption = sprintf(
+    "Table 2. Model-predicted best-case RM 8.5 7DADM for each action timing relative to the anchor event (%s). Positive 'Change from observed' means more flow than was present would have been required.",
+    format(anchor_date, "%b %d, %Y")
+  )
+)
+```
+
+```{r prior-flow-interp, echo=FALSE, results='asis'}
+min_pred_all <- min(threshold_df$pred_7dadm, na.rm = TRUE)
+any_cross    <- any(threshold_df$crosses)
+
+if (any_cross) {
+  best_lead <- threshold_df |> filter(crosses) |> slice_min(flow_cfs, n = 1)
+  cat(sprintf(
+    "**Key finding:** Acting %d day(s) before the exceedance, a sustained Camp Polk flow of **%.0f cfs** is estimated to be sufficient to hold RM 8.5 7DADM at or below %.1f°C. ",
+    best_lead$lead_days, best_lead$flow_cfs, target_C
+  ))
+  if (nrow(filter(threshold_df, crosses)) > 1) {
+    worst_lead <- threshold_df |> filter(crosses) |> slice_max(flow_cfs, n = 1)
+    cat(sprintf(
+      "Waiting until %d day(s) prior raises the required flow to **%.0f cfs** — a difference of %.0f cfs — because less time remains for cooler water to work through the system.\n\n",
+      worst_lead$lead_days, worst_lead$flow_cfs,
+      worst_lead$flow_cfs - best_lead$flow_cfs
+    ))
+  } else {
+    cat("\n\n")
+  }
+} else {
+  cat(sprintf(
+    "**Key finding:** Across all three lead windows (1, 3, and 7 days prior), no Camp Polk flow within the observed historical range is predicted to bring RM 8.5 7DADM below %.1f°C for this event. The minimum achievable predicted 7DADM across all leads is **%.2f°C**. This anchor event was primarily driven by atmospheric conditions (air temperature, solar radiation) rather than upstream hydrology — flow management alone would not have been sufficient.\n\n",
+    target_C, min_pred_all
+  ))
+}
+```
+
+**Operational interpretation:**
+
+The critical constraint is not just *how much* flow, but *how early* the decision
+is made. Camp Polk flow changes take time to propagate downstream and accumulate
+as a 7-day average at RM 8.5. A flow action that begins 7 days prior can spread
+the required increase across a full week; waiting until 1 day prior concentrates
+the entire thermal debt into a single day's flow signal.
+
+In practice, this means:
+
+- **7-day lead decisions** are made under the most forecast uncertainty (air
+  temperatures 7 days out carry larger errors), but they require the least
+  additional flow and give the most time to ramp.
+- **1-day lead decisions** use near-certain weather forecasts but may require
+  flows beyond what is operationally achievable within a single day.
+- For events where the atmospheric signal is strong enough that no flow in the
+  historical range can achieve compliance (as the table above may show), early
+  warning is still valuable — it allows managers to communicate limitations and
+  prepare mitigations for the following week's conditions.
+
+*Note: The RF models here are trained to predict 7DADM `k` days ahead given
+conditions on the run date. Leads 2, 4, 5, and 6 are not directly modeled; the
+relationship between lead time and required flow can be interpolated from the
+three curves shown, but should not be extrapolated beyond 7 days.*
+
