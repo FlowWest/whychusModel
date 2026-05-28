@@ -130,10 +130,15 @@ get_owrd_hydro <- function(
   txt <- content(resp_post, as = "text", encoding = "UTF-8")
   
   if (download_format == "tsv" || str_detect(ctype, "tab|plain|octet-stream")) {
-    return(
-      read_tsv(I(txt), show_col_types = FALSE) |>
-        clean_names()
-    )
+    result <- read_tsv(I(txt), show_col_types = FALSE) |> clean_names()
+    if (nrow(result) == 0) {
+      stop(
+        "OWRD returned 0 rows for station ", station_nbr,
+        " (", data_source, ", ", start_date, " to ", end_date, "). ",
+        "The near-real-time endpoint only retains ~100 days of data. "
+      )
+    }
+    return(result)
   }
   
   cat(substr(txt, 1, 1000))
