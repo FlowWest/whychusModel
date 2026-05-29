@@ -2,7 +2,7 @@ name: Daily Temperature Forecast
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 permissions:

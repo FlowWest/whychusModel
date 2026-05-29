@@ -121,9 +121,10 @@ all_forecasts <- bind_rows(
   nws_cloud
 ) |> 
   mutate(
-    run_date     = today,
+    run_date      = today,
+    # FIX: use PST timezone so minTemperature 03:00 UTC timestamps map to correct local date
     forecast_date = as.Date(datetime, tz = "America/Los_Angeles"),
-    lead_days    = as.integer(forecast_date - today)
+    lead_days     = as.integer(forecast_date - today)
   ) |>
   select(run_date, forecast_date, lead_days, variable, value) 
 
@@ -148,22 +149,27 @@ make_fallback_df <- function(variable_name) {
     select(datetime, value)
 }
 
-daily_nws <- function(df, target_date, agg_fn = mean, fallback_df = NULL) {
+# FIX: added tz argument; catches Inf (from min/max on empty set) in addition to NaN/NA
+daily_nws <- function(df, target_date, agg_fn = mean, fallback_df = NULL,
+                      tz = "America/Los_Angeles") {
   result <- df |>
-    mutate(date = as.Date(datetime)) |>
+    mutate(date = as.Date(datetime, tz = tz)) |>   # FIX: timezone-aware date conversion
     filter(date == target_date) |>
     summarise(value = agg_fn(value, na.rm = TRUE)) |>
     pull(value)
   
-  if (length(result) == 0 || is.nan(result)) {
-    message("attempting use of fallback df... ")
+  # FIX: is.infinite() catches Inf returned by min()/max() on zero-row input
+  bad_result <- length(result) == 0 || is.nan(result) || is.na(result) || is.infinite(result)
+  
+  if (bad_result) {
+    message(sprintf("attempting use of fallback df for %s...", target_date))
     if (!is.null(fallback_df)) {
       result <- fallback_df |>
-        mutate(date = as.Date(datetime)) |>
-        filter(date == target_date) |> 
+        mutate(date = as.Date(datetime, tz = tz)) |>   # FIX: timezone-aware here too
+        filter(date == target_date) |>
         summarise(value = agg_fn(value, na.rm = TRUE)) |>
         pull(value)
-      if (length(result) > 0 && !is.nan(result)) {
+      if (length(result) > 0 && !is.nan(result) && !is.na(result) && !is.infinite(result)) {
         message(sprintf("  [fallback] Used log for date %s", target_date))
         return(result)
       }
@@ -206,18 +212,18 @@ print(nws_tmin)
 
 # ── 4a. Build features for all lead days ──────────────────────────────────────
 feat_list <- map(lead_days_vec, function(k) {
-    fdate <- today + k
-    
-    fb_tmax  <- make_fallback_df("maxTemperature")
-    fb_tmin  <- make_fallback_df("minTemperature")
-    fb_cloud <- make_fallback_df("skyCover")
-    
-    air_max_k    <- daily_nws(nws_tmax,  fdate,     max,  fb_tmax)
-    air_min_k    <- daily_nws(nws_tmin,  fdate,     min,  fb_tmin)
-    cloud_k      <- daily_nws(nws_cloud, fdate,     mean, fb_cloud)
-    air_max_m1_k <- daily_nws(nws_tmax,  fdate - 1, max,  fb_tmax)   
-    air_min_m1_k <- daily_nws(nws_tmin,  fdate - 1, min,  fb_tmin)   
-
+  fdate <- today + k
+  
+  fb_tmax  <- make_fallback_df("maxTemperature")
+  fb_tmin  <- make_fallback_df("minTemperature")
+  fb_cloud <- make_fallback_df("skyCover")
+  
+  air_max_k    <- daily_nws(nws_tmax,  fdate,     max,  fb_tmax)
+  air_min_k    <- daily_nws(nws_tmin,  fdate,     min,  fb_tmin)
+  cloud_k      <- daily_nws(nws_cloud, fdate,     mean, fb_cloud)
+  air_max_m1_k <- daily_nws(nws_tmax,  fdate - 1, max,  fb_tmax)   
+  air_min_m1_k <- daily_nws(nws_tmin,  fdate - 1, min,  fb_tmin)   
+  
   feat_tmax <- data.frame(
     cp_flow_mean = cp_today$cp_flow_mean,
     cp_tmax      = cp_today$cp_tmax,
@@ -231,7 +237,7 @@ feat_list <- map(lead_days_vec, function(k) {
     air_min_m1   = air_min_m1_k,
     Tmax_m1      = Tmax_m1
   )
-
+  
   feat_7dadm <- data.frame(
     cp_flow_mean = cp_today$cp_flow_mean,
     cp_7dadm     = cp_today$cp_7dadm,
@@ -245,7 +251,7 @@ feat_list <- map(lead_days_vec, function(k) {
     air_min_m1   = air_min_m1_k,
     dadm_m1      = dadm_m1
   )
-
+  
   list(k = k, fdate = fdate, feat_tmax = feat_tmax, feat_7dadm = feat_7dadm)
 })
 
@@ -292,10 +298,10 @@ cat(sprintf("feat_7dadm log updated: %s (%d total rows)\n", feat_7dadm_log_file,
 results_list <- map(feat_list, function(x) {
   k     <- x$k
   fdate <- x$fdate
-
+  
   rf_tmax  <- readRDS(here("output", paste0("rm85_rf_tmax_lead",  k, ".rds")))
   rf_7dadm <- readRDS(here("output", paste0("rm85_rf_7dadm_lead", k, ".rds")))
-
+  
   # 2025 "actuals" for the same calendar day as the forecast date
   actual_tmax <- rm_8_5_historical |>
     filter(statistic == "max",
@@ -303,14 +309,14 @@ results_list <- map(feat_list, function(x) {
            month(date) == month(fdate),
            day(date)   == day(fdate)) |>
     pull(temperature)
-
+  
   actual_dadm <- rm_8_5_historical |>
     filter(statistic == "7DADM",
            year(date)  == 2025,
            month(date) == month(fdate),
            day(date)   == day(fdate)) |>
     pull(temperature)
-
+  
   tibble(
     run_date       = today,
     forecast_date  = fdate,
@@ -344,4 +350,3 @@ if (file.exists(temp_forecast_log_file)) {
 
 write_csv(updated, temp_forecast_log_file)
 cat(sprintf("Instream Temp Forecast log updated: %s (%d total rows)\n", temp_forecast_log_file, nrow(updated)))
-
