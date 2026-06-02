@@ -5,6 +5,7 @@ library(zoo)
 library(here)
 library(whychusModel)
 library(randomForest)
+library(plotly)
 
 # ── Data ────────────────────────────────────────────────────────────────────────
 load(here("data", "rm_8_5_historical.rda"))
@@ -171,10 +172,10 @@ ui <- fluidPage(
 
     # ── Plots ─────────────────────────────────────────────────────────────────
     column(9,
-      div(class = "card", plotOutput("temp_plot",    height = "200px")),
-      div(class = "card", plotOutput("flow_plot",    height = "175px")),
-      div(class = "card", plotOutput("airtemp_plot", height = "175px")),
-      div(class = "card", plotOutput("sweep_plot",   height = "220px"))
+      div(class = "card", plotlyOutput("temp_plot",    height = "200px")),
+      div(class = "card", plotlyOutput("flow_plot",    height = "175px")),
+      div(class = "card", plotlyOutput("airtemp_plot", height = "175px")),
+      div(class = "card", plotlyOutput("sweep_plot",   height = "220px"))
     )
   )
 )
@@ -317,9 +318,12 @@ server <- function(input, output, session) {
                style = "font-size:12px; color:#888;"))
     }
 
+    d <- sel_date()
     rows <- lapply(lead_days_vec, function(k) {
       row <- sw$threshold |> filter(lead_days == k)
       if (nrow(row) == 0) return(NULL)
+
+      run_date_lbl <- format(d - k, "%b %d")
 
       val_txt <- if (row$crosses) {
         sprintf("%d cfs", round(row$flow_cfs))
@@ -333,7 +337,11 @@ server <- function(input, output, session) {
       }
 
       div(class = "offset-row",
-        span(class = "offset-lead", sprintf("%d-day lead:", k)),
+        div(
+          span(class = "offset-lead", sprintf("%d-day lead:", k)),
+          span(style = "font-size:11px; color:#999; margin-left:4px;",
+               sprintf("(%s)", run_date_lbl))
+        ),
         div(
           if (!is.null(val_txt)) span(class = "offset-val",  val_txt),
           br(),
@@ -347,15 +355,28 @@ server <- function(input, output, session) {
   })
 
   # ── Plots ────────────────────────────────────────────────────────────────────
-  output$temp_plot <- renderPlot({
+  output$temp_plot <- renderPlotly({
     req(nrow(temp_win()) > 0)
     d    <- sel_date()
     peak <- filter(temp_win(), date == d)
 
-    p <- ggplot(temp_win(), aes(x = date)) +
+    tw <- temp_win() |>
+      mutate(
+        tmax_lbl   = sprintf("%.1f°C", tmax),
+        dadm_lbl   = sprintf("%.1f°C", dadm_7),
+        date_lbl   = format(date, "%b %d")
+      )
+
+    p <- ggplot(tw, aes(x = date)) +
       window_shade() +
-      geom_line(aes(y = tmax),   color = clr_grey, linewidth = 0.6, alpha = 0.7) +
+      geom_line(aes(y = tmax), color = clr_grey, linewidth = 0.6, alpha = 0.7) +
+      geom_point(aes(y = tmax,
+                     text = paste0("Date: ", date_lbl, "<br>Daily Max: ", tmax_lbl)),
+                 color = clr_grey, size = 1, alpha = 0) +
       geom_line(aes(y = dadm_7), color = clr_rm85, linewidth = 1.2) +
+      geom_point(aes(y = dadm_7,
+                     text = paste0("Date: ", date_lbl, "<br>7DADM: ", dadm_lbl)),
+                 color = clr_rm85, size = 1, alpha = 0) +
       geom_hline(yintercept = target_C, linetype = "dashed",
                  color = clr_exceed, linewidth = 0.7) +
       scale_x_date(date_labels = "%b %d", date_breaks = "2 days") +
@@ -368,71 +389,104 @@ server <- function(input, output, session) {
       p <- p +
         geom_point(data = peak, aes(y = dadm_7),
                    shape = 21, size = 4, fill = clr_exceed,
-                   color = "white", stroke = 1.5) +
-        annotate("text", x = d + 0.4, y = peak$dadm_7 + 0.5,
-                 label = sprintf("%.1f°C", peak$dadm_7),
-                 hjust = 0, color = clr_exceed, size = 3.5)
+                   color = "white", stroke = 1.5)
     }
-    p
+    ggplotly(p, tooltip = "text") |> layout(showlegend = FALSE)
   })
 
-  output$flow_plot <- renderPlot({
+  output$flow_plot <- renderPlotly({
     req(nrow(flow_win()) > 0)
-    ggplot(flow_win(), aes(x = date, y = flow_cfs)) +
-      window_shade() +
+    fw <- flow_win() |>
+      mutate(
+        date_lbl = format(date, "%b %d"),
+        flow_lbl = scales::comma(round(flow_cfs))
+      )
+    p <- ggplot(fw, aes(x = date, y = flow_cfs,
+                        text = paste0("Date: ", date_lbl, "<br>Flow: ", flow_lbl, " cfs"))) +
       geom_col(fill = clr_flow, alpha = 0.65, width = 0.8) +
       scale_x_date(date_labels = "%b %d", date_breaks = "2 days") +
       scale_y_continuous(labels = scales::comma,
                          expand = expansion(mult = c(0, 0.08))) +
       labs(title    = "Camp Polk Mean Daily Flow",
-           subtitle = "Shading = 7-day window averaging into selected 7DADM",
            x = NULL, y = "Flow (cfs)") +
       base_theme()
+    ggplotly(p, tooltip = "text") |> layout(showlegend = FALSE)
   })
 
-  output$airtemp_plot <- renderPlot({
+  output$airtemp_plot <- renderPlotly({
     req(nrow(air_win()) > 0)
     aw <- air_win()
     req("temperature_2m_max" %in% names(aw), "temperature_2m_min" %in% names(aw))
 
-    ggplot(aw, aes(x = date)) +
-      window_shade() +
+    aw <- aw |>
+      mutate(
+        date_lbl    = format(date, "%b %d"),
+        tmax_lbl    = sprintf("%.1f°C", temperature_2m_max),
+        tmin_lbl    = sprintf("%.1f°C", temperature_2m_min)
+      )
+
+    p <- ggplot(aw, aes(x = date)) +
       geom_ribbon(aes(ymin = temperature_2m_min, ymax = temperature_2m_max),
                   fill = clr_air, alpha = 0.2) +
       geom_line(aes(y = temperature_2m_max), color = clr_air, linewidth = 0.9) +
+      geom_point(aes(y = temperature_2m_max,
+                     text = paste0("Date: ", date_lbl, "<br>Air Max: ", tmax_lbl)),
+                 color = clr_air, size = 1, alpha = 0) +
       geom_line(aes(y = temperature_2m_min), color = clr_air, linewidth = 0.5,
                 linetype = "dashed") +
+      geom_point(aes(y = temperature_2m_min,
+                     text = paste0("Date: ", date_lbl, "<br>Air Min: ", tmin_lbl)),
+                 color = clr_air, size = 1, alpha = 0) +
       scale_x_date(date_labels = "%b %d", date_breaks = "2 days") +
       labs(title    = "Air Temperature near Camp Polk (2 m)",
            subtitle = "Solid = daily max  |  Dashed = daily min  |  Ribbon = range",
            x = NULL, y = "°C") +
       base_theme()
+    ggplotly(p, tooltip = "text") |> layout(showlegend = FALSE)
   })
 
-  output$sweep_plot <- renderPlot({
+  output$sweep_plot <- renderPlotly({
     sw <- flow_sweep()
     if (is.null(sw)) {
-      return(ggplot() +
-               annotate("text", x = 0.5, y = 0.5,
-                        label = "Model features unavailable for this date",
-                        hjust = 0.5, color = "grey50", size = 4) +
-               theme_void())
+      p <- ggplot() +
+        annotate("text", x = 0.5, y = 0.5,
+                 label = "Model features unavailable for this date",
+                 hjust = 0.5, color = "grey50", size = 4) +
+        theme_void()
+      return(ggplotly(p))
     }
 
     threshold_crossings <- filter(sw$threshold, crosses)
     d <- sel_date()
 
-    p <- ggplot(sw$sweep,
+    sweep_labeled <- sw$sweep |>
+      mutate(
+        lead_lbl = lead_labels[as.character(lead_days)],
+        run_date_lbl = format(d - lead_days, "%b %d"),
+        tip = paste0(lead_lbl, " (run ", run_date_lbl, ")",
+                     "<br>Flow: ", scales::comma(round(flow_cfs)), " cfs",
+                     "<br>Pred 7DADM: ", sprintf("%.2f°C", pred_7dadm))
+      )
+
+    obs_labeled <- sw$obs_pred |>
+      mutate(
+        lead_lbl = lead_labels[as.character(lead_days)],
+        run_date_lbl = format(d - lead_days, "%b %d"),
+        tip = paste0(lead_lbl, " (run ", run_date_lbl, ") — observed flow",
+                     "<br>Flow: ", scales::comma(round(flow_cfs)), " cfs",
+                     "<br>Pred 7DADM: ", sprintf("%.2f°C", pred_7dadm))
+      )
+
+    p <- ggplot(sweep_labeled,
                 aes(x = flow_cfs, y = pred_7dadm,
-                    color = factor(lead_days), group = factor(lead_days))) +
+                    color = factor(lead_days), group = factor(lead_days),
+                    text = tip)) +
       geom_line(linewidth = 1.1) +
       geom_hline(yintercept = target_C, linetype = "dashed",
                  color = clr_exceed, linewidth = 0.8) +
-      annotate("text",
-               x = flow_range[1] + 2, y = target_C + 0.18,
-               label = "20°C threshold", hjust = 0, color = clr_exceed, size = 3.2) +
-      geom_point(data = sw$obs_pred,
-                 aes(x = flow_cfs, y = pred_7dadm, color = factor(lead_days)),
+      geom_point(data = obs_labeled,
+                 aes(x = flow_cfs, y = pred_7dadm, color = factor(lead_days),
+                     text = tip),
                  size = 3.5, shape = 16) +
       scale_color_manual(values = lead_colors, labels = lead_labels, name = NULL) +
       scale_x_continuous(labels = scales::comma) +
@@ -443,16 +497,22 @@ server <- function(input, output, session) {
       theme(legend.position = "bottom")
 
     if (nrow(threshold_crossings) > 0) {
+      tc_labeled <- threshold_crossings |>
+        mutate(
+          lead_lbl = lead_labels[as.character(lead_days)],
+          run_date_lbl = format(d - lead_days, "%b %d"),
+          tip = paste0(lead_lbl, " (run ", run_date_lbl, ") — threshold flow",
+                       "<br>Flow: ", scales::comma(round(flow_cfs)), " cfs")
+        )
       p <- p +
-        geom_vline(data = threshold_crossings,
+        geom_vline(data = tc_labeled,
                    aes(xintercept = flow_cfs, color = factor(lead_days)),
                    linetype = "dotted", linewidth = 0.8, show.legend = FALSE) +
-        geom_label(data = threshold_crossings,
-                   aes(x = flow_cfs, y = target_C - 0.5,
-                       label = sprintf("%.0f cfs", flow_cfs),
-                       color = factor(lead_days)),
-                   size = 3, show.legend = FALSE,
-                   label.padding = unit(0.15, "lines"))
+        geom_text(data = tc_labeled,
+                  aes(x = flow_cfs, y = target_C - 0.5,
+                      label = sprintf("%.0f cfs", flow_cfs),
+                      color = factor(lead_days)),
+                  size = 3, show.legend = FALSE, vjust = 1.5, fontface = "bold")
     } else {
       p <- p +
         annotate("text",
@@ -460,7 +520,8 @@ server <- function(input, output, session) {
                  label = "Threshold not achievable — atmospheric driver dominates",
                  hjust = 0.5, color = "grey40", size = 3.2, fontface = "italic")
     }
-    p
+    ggplotly(p, tooltip = "text") |>
+      layout(legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.15))
   })
 }
 
