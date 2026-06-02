@@ -52,12 +52,12 @@ cp_7dadm <- cp_tmax |>
 cp_today <- cp_flow |>
   filter(date == today) |>
   left_join(cp_tmax, by = "date") |>
-  left_join(select(cp_7dadm, date, cp_7dadm), by = "date")
+  left_join(select(cp_7dadm, date, cp_7dadm), by = "date") 
 
 cp_yest <- cp_flow |>
   filter(date == today - 1) |>
   left_join(cp_tmax, by = "date") |>
-  left_join(select(cp_7dadm, date, cp_7dadm), by = "date")
+  left_join(select(cp_7dadm, date, cp_7dadm), by = "date") 
 
 # ── 2. NWS air temperature & cloud cover ──────────────────────────────────────
 nws_tmax <- whychusModel::all_historical_forecasts |> 
