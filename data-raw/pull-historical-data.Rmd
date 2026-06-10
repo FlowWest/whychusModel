@@ -1022,3 +1022,84 @@ camp_polk_temperature_historical <- camp_polk_historical |>
 usethis::use_data(camp_polk_temperature_historical, overwrite = TRUE)
 
 ```
+
+### Historical air temperature data - Sisters, OR
+
+```{r}
+# Pull historical daily air temperature data near Sisters, OR
+# Uses GridMET via the climateR package (~4km gridded, 1979-present, no API key needed)
+#
+# Sisters, OR coordinates: 44.2896 N, 121.5491 W
+#
+# Install:
+# install.packages("remotes")
+# remotes::install_github("mikejohnson51/climateR")
+# install.packages(c("sf", "dplyr"))
+
+library(climateR)  # getGridMET()
+library(sf)        # st_as_sf(), st_point()
+library(dplyr)     # mutate(), rename()
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+START_DATE  <- "1979-01-01"
+END_DATE    <- "2025-12-31"
+OUTPUT_PATH <- "sisters_air_temp.csv"
+# Temperature threshold for rain/snow partitioning (degrees C)
+# Precip is classified as snow when tavg_C <= SNOW_THRESH
+SNOW_THRESH <- 0
+# ── Define location as sf point ───────────────────────────────────────────────
+
+sisters_pt <- sf::st_as_sf(
+  data.frame(site = "Sisters_OR", lon = -121.5491, lat = 44.2896),
+  coords = c("lon", "lat"),
+  crs = 4326
+)
+
+# ── Pull GridMET data ─────────────────────────────────────────────────────────
+# varname options for temperature: "tmmx" (max), "tmmn" (min)
+# GridMET stores temperature in Kelvin
+
+raw <- climateR::getGridMET(
+  AOI       = sisters_pt,
+  varname   = c("tmmx", "tmmn", "pr"),
+  startDate = START_DATE,
+  endDate   = END_DATE
+)
+
+# ── Clean and convert units ───────────────────────────────────────────────────
+# GridMET returns a data.frame when AOI is a point
+
+# Air temperature
+sisters_air_temp_historical <- raw |>
+  dplyr::rename(date = date, tmax_K = tmmx, tmin_K = tmmn) |>
+  dplyr::mutate(
+    date   = as.Date(date),
+    tmax_C = tmax_K - 273.15,
+    tmin_C = tmin_K - 273.15,
+    tavg_C = (tmax_C + tmin_C) / 2,
+    tmax_F = tmax_C * 1.8 + 32,
+    tmin_F = tmin_C * 1.8 + 32,
+    tavg_F = tavg_C * 1.8 + 32
+  ) |>
+  dplyr::select(date, tmax_C, tmin_C, tavg_C, tmax_F, tmin_F, tavg_F)
+
+# Save
+usethis::use_data(sisters_air_temp_historical, overwrite = T)
+
+# Precip
+sisters_precip_historical <- raw |>
+  dplyr::mutate(
+    date        = as.Date(date),
+    tmax_C      = tmmx - 273.15,
+    tmin_C      = tmmn - 273.15,
+    tavg_C      = (tmax_C + tmin_C) / 2,
+    precip_mm   = pr,
+    snow_mm     = dplyr::if_else(tavg_C <= SNOW_THRESH, precip_mm, 0),
+    rain_mm     = dplyr::if_else(tavg_C >  SNOW_THRESH, precip_mm, 0)
+  ) |>
+  dplyr::select(date, precip_mm, rain_mm, snow_mm)
+
+# Save
+usethis::use_data(sisters_precip_historical, overwrite = T)
+```

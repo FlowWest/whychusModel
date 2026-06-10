@@ -63,21 +63,14 @@ model_dir      <- here("output")
 
 ## 1. Historical RM 8.5 Exceedances
 
-```{r load-data}
-load("~/Documents/git/udwc_temperature/data/all_rm_8_5_dates_and_times.rda")
-rm85_hourly <- all_rm_8_5_dates_and_times
-```
-
 ```{r rm85-daily}
 # Full-history daily max and 7DADM at RM 8.5
 # TODO: use whychusModel::rm_8_5_historical
-rm85_dadm_all <- rm85_hourly |>
-  mutate(date = as.Date(date), temp_c = temperature) |>
-  filter(!is.na(date), !is.na(temp_c)) |>
-  group_by(date) |>
-  summarise(tmax = max(temp_c, na.rm = TRUE), .groups = "drop") |>
-  arrange(date) |>
-  mutate(dadm_7 = rollmean(tmax, k = 7, fill = NA, align = "right"))
+rm85_dadm_all <- whychusModel::rm_8_5_historical |> 
+  filter(statistic %in% c("max", "7DADM")) |> 
+  pivot_wider(id_cols = date, names_from = "statistic", values_from = "temperature") |> 
+  rename(tmax = max,
+         dadm_7 = `7DADM`)
 
 # 2024 analysis window
 rm85_daily_max <- rm85_dadm_all |>
@@ -157,6 +150,9 @@ ggplot(flow_hist, aes(x = date, y = flow_cfs)) +
 # Used as a delta: given a flow change from q_obs to q, the model estimates how much
 # Camp Polk 7DADM changes. The observed temperature is preserved as the baseline so that
 # the thermal state of the system on each run date is respected.
+
+# Agree that this is an area of improvement, some thoughts include - where would the flow action be occurring, assumping TSID diversion. We could model the change in temperature resulting from flow left instream in the reach between TSID and Camp Polk rather than the direct relationship between flow and temperature at CP. 
+
 cp_flow_temp_hist <- camp_polk_flow_historical |>
   filter(statistic == "mean") |> select(date, flow_cfs) |>
   inner_join(
@@ -169,6 +165,7 @@ cp_flow_temp_hist <- camp_polk_flow_historical |>
   filter(month(date) %in% 6:9, !is.na(flow_cfs), !is.na(cp_7dadm))
 
 cp_temp_lm <- lm(cp_7dadm ~ log(flow_cfs), data = cp_flow_temp_hist)
+summary(cp_temp_lm)
 
 # Returns the model-predicted temperature at flow q (used only to compute deltas)
 cp_temp_at_flow <- function(q) {
