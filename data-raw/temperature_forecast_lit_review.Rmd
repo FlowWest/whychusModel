@@ -1,0 +1,439 @@
+---
+title: "Literature Review: Machine Learning Instream Temperature Forecasting and Flow-Based Temperature Management"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+---
+
+## Overview
+
+This literature review supports a two-component modeling framework: (1) a random forest model forecasting instream water temperature using flow, upstream temperature, air temperature, and day of year as predictors, and (2) an inverse application of those forecasts to identify flow augmentation targets needed to prevent thermal threshold exceedances. The review is organized around three themes that directly correspond to the modeling approach.
+
+---
+
+## 1. Predictor Variables in Stream Temperature Models
+
+The predictor set used here — air temperature, upstream water temperature, streamflow, and day of year — is well-supported by the literature as both sufficient and appropriate for operational temperature forecasting.
+
+Zhu et al. (2019) evaluated feedforward neural networks, Gaussian process regression, and decision tree models across eight river stations using air temperature ($T_a$), flow discharge ($Q$), and day of year (DOY) as core inputs. Including DOY dramatically improved model performance across all approaches, while the contribution of flow discharge was most pronounced at high-altitude, cold-water-influenced sites — consistent with snowmelt- or reservoir-dominated systems. Garner et al. (2025), working in the Dairy McKay Watershed in Oregon, found that a parsimonious four-predictor set of air temperature, streamflow, day of year, and riparian shade factor produced reliable temporal predictions, with performance degrading little when additional variables were added. This closely mirrors the predictor structure used here, with upstream temperature serving a similar role to shade as a local thermal modifier.
+
+A comprehensive 2025 review in *Hydrology and Earth System Sciences* (Niel et al. 2025) confirmed that including DOY has become standard practice for capturing seasonality in stream water temperature models, and that air temperature remains the dominant single predictor across virtually all published approaches. Piccolroaz et al. (2022), in a study of lake surface water temperature prediction using multiple ML algorithms, similarly found that air temperature and day of year were the best predictors, with all other variables having comparatively minor effects.
+
+Including upstream temperature as a predictor — not widely used in the broader benchmark literature, which typically focuses on single-station prediction — is particularly valuable for systems with longitudinal thermal gradients, regulated reaches, or tributary cold-water inputs, as it captures heat propagation and memory that air temperature alone cannot represent.
+
+---
+
+## 2. Machine Learning Models for Stream Temperature Prediction
+
+Random forest is among the best-validated approaches in the stream temperature ML literature, with strong performance across a range of catchment types and input configurations.
+
+Leitner et al. (2021) benchmarked six ML models — random forest, XGBoost, feedforward neural networks, and two types of recurrent neural networks — for daily water temperature prediction across ten Austrian catchments using air temperature, runoff, precipitation, and global radiation. All ML models outperformed both linear regression and the widely-used air2stream benchmark model, achieving a mean RMSE of approximately 0.55°C. The authors noted that the tested input sets "could be used as a basis for short-term forecasts," directly supporting operationalized multi-day prediction. Wade et al. (2023) applied random forest regression specifically, using 23 predictors spanning hydrology, watershed characteristics, climate, and human impacts to predict maximum monthly stream temperatures at 410 USGS gages across the contiguous US, achieving correlation coefficients of approximately 0.95–0.99 and NSE values of 0.90–0.98.
+
+Zhu et al. (2019) found that decision tree models outperformed feedforward neural networks and Gaussian process regression in calibration, though FFNN slightly edged decision trees in validation. The air2stream model outperformed ML at most sites, except where flow discharge provided strong predictive gain — again consistent with regulated or snowmelt-driven systems. Garner et al. (2025) evaluated ML models for shade-affected stream temperatures and confirmed that reliable predictions are achievable with parsimonious predictor sets, suggesting that model complexity beyond the core predictor set yields diminishing returns.
+
+---
+
+## 3. Flow Augmentation for Temperature Management
+
+The inverse problem — using a temperature forecast to identify what flows would offset exceedances — is motivated by a broad applied literature demonstrating that discharge is a meaningful but context-dependent lever for temperature management. Case studies span reservoir operations on large regulated rivers, tributary augmentation on small unregulated streams, and regulatory frameworks that formally quantify the temperature benefit of restored flow. Each offers relevant framing for how forecasted temperatures can be translated into flow targets.
+
+### 3.1 Flow–Temperature Dynamics: Foundational Considerations
+
+The relationship between streamflow and temperature is not simply inverse. Ulaski et al. (2023) studied the Nicola River in British Columbia, a regulated semiarid watershed, over four years and found that while increasing streamflow reduces thermal sensitivity (the rate of stream temperature increase per degree of air temperature increase), the direction and magnitude of the effect depends critically on the source temperature of the augmentation water. This is a fundamental constraint: cold groundwater or reservoir hypolimnion releases cool effectively, while warm surface diversions may provide hydraulic connectivity without thermal benefit. In regulated systems, Sinokrot et al. (1995, as cited in Ulaski et al. 2023) describe the core strategy as storing water during cooler periods and timing releases to the warmest months.
+
+Olden and Naiman (2010), in a review published in *Freshwater Biology*, argued for broadening environmental flow frameworks beyond quantity alone to incorporate thermal regime management — explicitly calling for optimization models that evaluate management trade-offs between ecological and human water needs. This framing directly underpins the type of flow-targeting analysis your model enables.
+
+A key process-level paper is the Willamette Basin regression study by Dalton and Rounds (2022, USGS SIR 2021-5022), which developed seasonal regression relationships between air temperature, streamflow, and both 7-day average daily mean and 7-day average daily maximum stream temperature at 12 locations below USACE dams. They found that stream temperature is inversely correlated with streamflow in all seasons except winter (January–March), and that air temperature and streamflow together predict 7DADM and 7DADMAX with errors generally ≤1°C at sites distant from direct dam influence. This model structure — simple, operationally useful, and directly analogous to your RF approach — was developed specifically to inform flow management decisions for listed salmonids.
+
+### 3.2 Case Study: Sacramento River and Shasta Dam Operations
+
+The most extensively documented reservoir-scale flow-temperature management program in the western US is on the Sacramento River, where the Bureau of Reclamation operates Shasta Dam with a temperature control device (TCD) to protect Sacramento River winter-run Chinook salmon (*Oncorhynchus tshawytscha*), listed as endangered under the ESA. The TCD mixes cold water from the reservoir hypolimnion with warmer surface water before releasing it through the dam, with the goal of maintaining temperatures at or below 56°F (13.3°C) at the Keswick compliance point during the spawning season (May 15–October 31), per State Water Board Water Rights Order 90-5 (SRTTG 2018).
+
+The Sacramento River Temperature Task Group (SRTTG) produces annual plans and reports coordinating real-time operations across Shasta, Trinity, and Whiskeytown reservoirs. The plans illustrate the adaptive management cycle: cold water pool volume is modeled at the start of each water year, compliance temperatures and management seasons are set based on carryover storage and water year type, and operations are adjusted in real time based on fish distribution and temperature monitoring (SRTTG 2016; BOR 2023). In drought years such as 2014, 2015, 2021, and 2022, reduced cold water pool availability forced tradeoffs between early-season temperature protection and pool conservation for later critical periods (BOR 2022). The 2022 Temperature Management Plan notably prioritized fish over senior water deliveries for the first time, illustrating how acute temperature risk can shift operational priorities.
+
+Null et al. (Michel et al. 2022) used a process-based model (RAFT) to quantify how Shasta discharge management could reduce temperatures across the non-tidal Sacramento River, finding that discharge increases of up to 340 cms over a 29-year historical baseline could reduce lower-reach temperatures by up to 3.6°C. They identified late-spring (April–June) and early-fall (September–October) as the most tractable management windows for keeping temperatures below 20°C — the key salmon lifecycle threshold. This study is methodologically important because it demonstrates the same type of forward simulation your model enables, but using a process-based rather than statistical approach.
+
+### 3.3 Case Study: Columbia and Snake River Basins — Dworshak Dam Operations
+
+The Columbia River basin contains one of the most operationally complex and intensively managed flow-temperature systems in the Pacific Northwest. Each summer, cold water from the hypolimnion of Dworshak Reservoir (North Fork Clearwater River, Idaho) is released into the Clearwater River to cool the lower Snake River below its confluence at Lewiston, targeting water temperatures at Lower Granite Dam below 68°F (20°C), the threshold established in NOAA Fisheries' Columbia River Power System Biological Opinions (BPA/USACE, via Haller n.d.; USACE/TMT operations).
+
+Cold water released from Dworshak typically ranges from 42–44°F (5.6–6.7°C) deep in the reservoir in summer, contrasting with Snake River temperatures that may exceed 68°F (20°C) during heat events. The thermal difference is large enough that augmentation flows create measurable thermal stratification in Lower Granite Reservoir and the three downstream Snake River reservoirs, with bottom waters 4–6°C cooler than the surface (OSTI/PNNL 2004). Radio-tagging studies demonstrated that outmigrating subyearling fall Chinook actively select these cool-water refugia within reservoirs during flow augmentation periods (Tiffan et al. 2004).
+
+Operational decisions are made weekly through the interagency Technical Management Team (TMT), which includes the U.S. Army Corps of Engineers, NOAA Fisheries, the Nez Perce Tribe, the Idaho Department of Water Resources, and Bonneville Power Administration. As part of the Nez Perce Water Rights Agreement, the tribe holds a permanent right to 200,000 acre-feet of Dworshak storage for flow augmentation and temperature control in August and/or September (Haller n.d.). The operational tension is that excessive cold water releases in early July can retard growth of Clearwater River fall Chinook that overwinter in the lower Snake, while late-summer releases are critical for Snake River fish out-migrating in June and July — illustrating a recurring challenge in flow-temperature management: the same tool affects multiple populations with different thermal timing needs.
+
+### 3.4 Case Study: Trinity and Klamath Rivers — Multi-Basin Temperature Management
+
+The Trinity River basin is managed jointly for multiple objectives — water supply delivery to the Central Valley, anadromous salmonid recovery, and mainstem temperature compliance — making it one of the most relevant case studies for understanding how flow operations translate to downstream temperature outcomes.
+
+USGS constructed and calibrated the RBM10 water temperature model for the Trinity River, simulating 34 years (1980–2013) of daily mean temperatures at eight locations along 112 miles from Lewiston Dam to the Klamath confluence (Flint et al. 2016, USGS OFR 2016-1056). Three flow augmentation scenarios were simulated for a severe drought year (1994) to demonstrate how bypass flow releases from Lewiston Dam — which are temperature-controlled — could reduce the probability of disease outbreaks and lower temperatures in the Klamath mainstem below the 23°C thermal migration barrier for adult salmon. Outputs from the Trinity model were used as direct inputs to the existing Klamath River temperature model, enabling basin-scale scenario analysis.
+
+The Trinity River Restoration Program (TRRP) operationalizes these findings through a Flow Work Group that coordinates dam releases to maintain cool water for summer-rearing juveniles and spring-run adults throughout the mainstem. The lower reaches, once shallow and seasonally warm due to reduced post-dam flows, are now managed with sustained summer releases to prevent thermal barriers that pre-dam would not have existed (TRRP n.d.).
+
+In the lower Klamath, a large fish kill in September 2002 — linked to low flows, elevated temperatures, and disease — became a watershed event in California and federal fisheries management. Flow releases now serve as preventative tools specifically timed to the adult migration period in August and September, triggered by temperature thresholds rather than occurring only in response to mortality events (USFWS 2022). Sutton et al. (2007) documented the biological underpinning of this management: juvenile salmonids at the Beaver Creek confluence moved into cold-water refugia when mainstem temperatures (driven by Iron Gate Dam releases of 17–37 cms) exceeded 22–23°C, and they did not necessarily seek the absolute coldest water but selected habitats within their thermal tolerance range — a nuance relevant to interpreting both threshold exceedances and the biological effectiveness of marginal temperature reductions.
+
+The 2016 Lower Klamath River Late Summer Flow Augmentation Plan (BOR 2016), authorized under NOAA's Biological Opinion, represents one of the clearest examples of formalized flow-temperature management planning: specific flow components (Preventive, Responsive, Emergency) with defined volumes, triggers, and durations were tied directly to temperature targets and disease risk indices during the adult migration window.
+
+### 3.5 Case Study: Willamette Basin — Regression-Based Flow Targeting
+
+The Willamette Basin provides a Pacific Northwest example of using empirical flow-temperature relationships directly for management decision support — the closest structural analog to your modeling approach. Dalton and Rounds (2022, USGS SIR 2021-5022) developed transition-smoothed seasonal regression models at 12 sites downstream of USACE dams, using air temperature and streamflow as predictors of 7DADM and 7DADMAX. The models predict temperature at errors generally ≤1°C and are explicitly intended to be used inversely: given a temperature target and a forecasted air temperature, what flow is needed?
+
+USGS also developed and applied CE-QUAL-W2 two-dimensional hydrodynamic models for the Willamette and key tributaries, used to investigate how dam operations affect thermal conditions and where and when temperatures are most challenging for threatened Upper Willamette River spring Chinook and winter steelhead (Rounds et al. 2022, USGS OFR 2022-1017). The McKenzie and Santiam basins have been the focus of environmental flow studies that prescribe the rate, frequency, duration, and timing of flow releases from dams for downstream thermal and ecological benefit (USGS, n.d.).
+
+Water temperature in the mainstem Willamette regularly exceeds the Oregon rearing standard of 18°C (64.4°F) for extended periods (USGS n.d.; ODEQ), creating ongoing ESA consultation obligations for USACE that directly motivate flow management research.
+
+### 3.6 Quantifying Temperature Credits from Flow Restoration
+
+Beyond reservoir operations, flow augmentation in smaller systems — through voluntary water transactions, lease programs, or off-channel storage — is increasingly evaluated using frameworks that explicitly quantify temperature reduction as a measurable outcome.
+
+The Water Workflow Temperature Tool (W3T), developed by Watercourse Engineering and funded by the National Fish and Wildlife Foundation in partnership with The Freshwater Trust and Willamette Partnership, provides a standardized method for quantifying temperature reductions from flow restoration into credits that can be applied toward regulatory compliance (The Freshwater Trust 2014). Increasing flow buffers temperature by increasing thermal mass and stream velocity, limiting exposure to solar heating. The tool has been piloted on flow restoration projects in the John Day, Hood, and Grande Ronde basins in Oregon, and ODEQ formally supports its use for demonstrating compliance benefits of instream flow transactions. This framework operationalizes the same conceptual logic your model embodies: a given temperature exceedance corresponds to a specific flow deficit, and restoring flow translates to a quantifiable thermal benefit.
+
+Kiernan et al. (2023) provide direct experimental evidence from Porter Creek, a small coho-bearing tributary to the Russian River in northern California. Releases of 13.9 L/s from an off-stream agricultural pond during two summer dry seasons prevented riffle drying, improved dissolved oxygen, reduced temperatures, and increased survival of juvenile coho salmon and steelhead in a controlled before-after-control-impact design. This study is particularly relevant because it isolates the temperature and survival effects of modest augmentation volumes in a small, unregulated stream — a scale and context often underrepresented in the largely dam-operations literature.
+
+---
+
+## 4. Operational Temperature Forecasting Linked to Flow Management Decisions
+
+The work described here occupies a specific and relatively underrepresented niche: using near-term temperature *forecasts* (not hindcasts or retrospective models) as direct inputs to flow management decisions. A small but growing body of work has addressed exactly this problem, most prominently in the Delaware River Basin.
+
+### 4.1 The Delaware River Basin: The Closest Operational Analog
+
+The Delaware River Basin (DRB) contains the most fully developed example of operational stream temperature forecasting explicitly coupled to reservoir release decisions for thermal management. Managers of three major reservoirs — Cannonsville, Pepacton, and Neversink — must balance competing demands: drinking water supply for more than 13 million people in New York City, downstream flow maintenance, and cold-water habitat for trout and freshwater mussels. The 2017 Flexible Flow Management Plan established a 23.89°C (75°F) maximum temperature threshold for the upper Delaware River. When temperatures are expected to exceed this threshold, managers execute "thermal bank releases" of cold hypolimnetic water from the reservoirs.
+
+Zwart et al. (2023, *JAWRA*) developed a process-guided deep learning and data assimilation (DA) framework to generate 7-day probabilistic forecasts of daily maximum water temperature at sites throughout the DRB. The model ingested NOAA Global Ensemble Forecasting System (GEFS) weather forecasts and observed reservoir releases, achieving RMSE of 1.1–1.4°C at 1-day lead and 1.4–1.9°C at 7-day lead. Critically, the forecasting system was run under two reservoir release scenarios in parallel for every forecast: a baseline (current conservation release only) and an augmented scenario (+100 cfs from Cannonsville, roughly a 20% increase in outflow). This dual-scenario structure is essentially the same logic your model implements — comparing forecasted temperatures under current vs. augmented flow conditions to anticipate exceedances and inform release decisions.
+
+Oliver et al. (2023, USGS data release) extended this to network-wide 7-day ahead forecasts at 70 river reaches in the upper DRB, with the explicit application stated as informing "decision makers who can use cold-water reservoir releases to maintain thermal habitat for sensitive fish species." A further extension by Corson-Dosch et al. (*Frontiers in Water*, 2023) evaluated deep learning architectures for forecasting at both monitored and unmonitored locations, issuing 7-day forecasts for 522 consecutive days during a test period and explicitly framing exceedances of the 23.89°C threshold as the management-relevant quantity being anticipated.
+
+This body of work represents the closest published analog to your model: weather forecast inputs, multi-day lead time, probabilistic temperature predictions, and direct linkage to a flow release decision framework.
+
+#### 4.1.1 Data Source Comparison: whychusModel vs. Zwart et al. (2023)
+
+Because Zwart et al. (2023) is the closest published operational analog to the whychusModel, it is instructive to compare the two systems' input data architectures directly. The two models address different scales — Zwart et al. is a multi-site national-scale system with reservoir management inputs, while the whychusModel is a single-reach operational tool — but their core meteorological and hydrological inputs are conceptually well-matched.
+
+```{r datasource-comparison-table, echo=FALSE}
+library(knitr)
+library(kableExtra)
+
+ds_table <- data.frame(
+  Category = c(
+    "Stream temperature observations",
+    "Stream temperature observations",
+    "Stream temperature observations",
+    "Streamflow",
+    "Reservoir / flow management",
+    "Historical weather (training)",
+    "Weather forecast (prediction)",
+    "Solar / radiation input",
+    "Process-based model pretraining"
+  ),
+  Paper_Source = c(
+    "NWIS (USGS)",
+    "WQP",
+    "EcoSHEDS",
+    "NWIS daily discharge",
+    "NYCDEP release volumes; ODRM release scenarios",
+    "gridMET (CONUS gridded reanalysis)",
+    "GEFS (NOAA ensemble forecast)",
+    "Solar radiation (gridMET / GEFS)",
+    "PRMS-SNTemp; GLM"
+  ),
+  whychusModel_Source = c(
+    "OWRD (Oregon Water Resources Dept.)",
+    "—",
+    "UDWC continuous temperature loggers (RM 6, RM 8.5)",
+    "OWRD (stations 14076100, 14076050, 14075000)",
+    "— (no major reservoir in watershed)",
+    "ERA5 reanalysis via Open-Meteo Archive API",
+    "NWS Gridpoint API + Open-Meteo GFS Seamless",
+    "Cloud cover (%) — proxy only",
+    "— (trains directly on observations)"
+  ),
+  Match = c(
+    "Strong — OWRD is Oregon's functional equivalent of USGS NWIS",
+    "Not used — national aggregator not needed for single-watershed tool",
+    "Partial — UDWC loggers serve same role as regional monitoring networks",
+    "Strong — same concept, different agency",
+    "Not applicable",
+    "Strong — both are gridded reanalysis products; ERA5 is global, gridMET is CONUS-specific",
+    "Strong — both use GFS-based ensemble products for days 1–7",
+    "Gap — cloud cover is a proxy; direct shortwave radiation not included",
+    "Gap — no pretraining phase in whychusModel"
+  ),
+  stringsAsFactors = FALSE
+)
+
+kable(ds_table,
+      col.names = c("Input category", "Zwart et al. (2023)", "whychusModel", "Alignment"),
+      align = c("l", "l", "l", "l"),
+      caption = "Comparison of input data sources between Zwart et al. (2023) and the whychusModel. Table 1 of Zwart et al. (2023) summarizes the full dataset inventory for that system.") |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = TRUE,
+    font_size = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "18%") |>
+  column_spec(2, width = "25%") |>
+  column_spec(3, width = "27%") |>
+  column_spec(4, width = "30%")
+```
+
+The two systems share the same fundamental input logic — real-time instream temperature, streamflow, and GFS-based weather forecasts for the forecast horizon — but differ in two structural ways. First, Zwart et al. include a process-guided pretraining phase using PRMS-SNTemp and GLM output, which regularizes the deep learning model toward physically consistent predictions before fitting to observations; the whychusModel trains a random forest directly on observations without this step. Second, the Delaware system ingests reservoir release volumes and scenarios from NYCDEP and ODRM as direct predictors, enabling the model to account for planned operations; this input class has no analog in the Whychus Creek system where there is no managed reservoir in the watershed.
+
+### 4.2 Forecasting as a Lead-Time Tool for Operations
+
+The practical value of short-term temperature forecasting for flow management is lead time. Reservoir operators and water managers need advance notice — typically 3–7 days — to plan, schedule, and execute augmentation releases given infrastructure constraints, downstream travel times, and coordination among agencies.
+
+Leitner et al. (2021) noted explicitly that ML-based temperature predictions "could be used as a basis for short-term forecasts" with immediate operational utility. The SRTTG's Sacramento River Temperature Management Plans formalize this concept: between May and June of each operational year, dozens of temperature model scenarios are run at different discharge levels, establishing a probabilistic envelope of expected conditions under alternative release strategies (SRTTG 2016). The 2022 plan notably used NOAA-NWS Local Three-Month Temperature Outlooks (L3MTO) and historical meteorology to project expected air temperatures, then fed those into operational temperature models — structurally identical to your use of NWS gridpoint forecasts as model inputs (BOR 2022).
+
+The USGS/USFWS RBM10 Trinity River temperature model similarly uses "publicly available simulated meteorological data and observed streamflow data" as model inputs, demonstrating that the same weather-driven input approach scales from your single-station RF framework to a 112-mile river network model (Flint et al. 2016).
+
+### 4.3 Thermal Exceedance Risk Under Climate Change
+
+A parallel literature frames the flow-temperature problem in terms of future exceedance risk — directly relevant to how your model's outputs might be interpreted in a climate planning context.
+
+East et al. (2018, *Climate Risk Management*) conducted a regional-scale climate vulnerability assessment for tailwater temperatures and flows below federal dams in the Pacific Northwest, using hybrid empirical–process models with CMIP5 climate projections. They found that thermal exceedance risk was projected to increase by an average of 0.27 (on a 0–1 probability scale) and that exceedance events would extend into late-spring and fall — a 10.3-day average increase in exceedance duration. This framing — days per year exceeding a threshold as the key metric — is directly relevant to how your model's flow-targeting outputs might be communicated to managers.
+
+Cheng et al. (2020, *Water Resources Research*) introduced the concept of "cooling potential" — the thermal energy a water body can absorb before exceeding a threshold — to quantify how reservoir regulation modifies climate sensitivity of downstream river temperatures. They found that reservoirs with large outflows depress stream temperatures over longer downstream distances, and that cooling potential decreases under warming scenarios across all river segments. Notably, reservoirs with strong thermal stratification retain significant cooling potential even by the 2080s under RCP 8.5, whereas unregulated segments are more vulnerable. This provides a physical framework for understanding the bounds on how much temperature reduction any given flow augmentation volume can achieve.
+
+### 4.4 Multi-Objective Optimization of Dam Operations for Temperature
+
+Beyond the scenario-comparison approach used in both your work and the DRB forecasting system, a small literature addresses formal optimization of dam operations with temperature as an objective.
+
+Ahmad and Hossain (2020, *PLOS ONE*) developed a multi-objective optimization framework for reservoir operations using inflow forecasts and air temperature to derive release policies that maximize hydropower while imposing tolerable temperature change constraints (1–6°C warming or cooling) on downstream reaches. The framework was implemented for Detroit Dam on the North Santiam River in Oregon, one of the Willamette Basin USACE dams, and used remote sensing for temperature estimation in data-limited settings. The key methodological insight was that "a more dynamic scheme that considers inflow forecast information at short-term weather scale can guide the dam operator ahead of time on optimal operations for realizing ecologically safer downstream conditions" — exactly the forward-looking, forecast-informed logic your approach implements.
+
+---
+
+---
+
+## 5. Summary Table
+
+```{r summary-table-placeholder, echo=FALSE}
+# Summary table rendered in Section 5
+```
+
+```{r summary-table}
+library(knitr)
+library(kableExtra)
+
+lit_table <- data.frame(
+  Study = c(
+    # Section 1
+    "Zhu et al. (2019)",
+    "Garner et al. (2025)",
+    "Piccolroaz et al. (2022)",
+    "Niel et al. (2025)",
+    # Section 2
+    "Leitner et al. (2021)",
+    "Wade et al. (2023)",
+    "Zhu et al. (2019)",
+    "Garner et al. (2025)",
+    # Section 3
+    "Ulaski et al. (2023)",
+    "Olden & Naiman (2010)",
+    "Dalton & Rounds (2022) — USGS SIR 2021-5022",
+    "Michel et al. (2022)",
+    "SRTTG (2016, 2018); BOR (2022, 2023)",
+    "Flint et al. (2016) — USGS OFR 2016-1056",
+    "TRRP (n.d.); USFWS (2022)",
+    "Sutton et al. (2007)",
+    "BOR (2016) — Lower Klamath Flow Augmentation Plan",
+    "Rounds et al. (2022) — USGS OFR 2022-1017",
+    "USGS (n.d.) — Willamette Env. Flows",
+    "The Freshwater Trust / W3T (2014)",
+    "Kiernan et al. (2023)",
+    "Haller (n.d.); USACE/TMT",
+    "Tiffan et al. (2004)",
+    # Section 4
+    "Zwart et al. (2023)",
+    "Oliver et al. (2023) — USGS data release",
+    "Corson-Dosch et al. (2023)",
+    "East et al. (2018)",
+    "Cheng et al. (2020)",
+    "Ahmad & Hossain (2020)"
+  ),
+  Section = c(
+    rep("1. Predictor variables", 4),
+    rep("2. Models used", 4),
+    rep("3. Flow augmentation", 15),
+    rep("4. Operational forecasting", 6)
+  ),
+  Key_Finding = c(
+    "DOY dramatically improves ML performance; flow discharge most important at cold-water-influenced sites",
+    "Four-predictor set (air temp, flow, DOY, shade) optimal for temporal prediction in Oregon",
+    "Air temperature and DOY are the dominant predictors; other variables have minor effects",
+    "DOY inclusion is now standard practice for capturing seasonality in stream temperature ML models",
+    "All ML models outperformed linear regression and air2stream benchmark; mean RMSE ≈ 0.55°C",
+    "Random forest with 23 predictors achieved R ≈ 0.95–0.99 and NSE ≈ 0.90–0.98 at 410 USGS gages",
+    "Decision tree best in calibration; FFNN slightly better in validation; air2stream competitive except at flow-dominated sites",
+    "Reliable predictions achievable with parsimonious predictor sets; additional variables yield diminishing returns",
+    "Flow increases reduce thermal sensitivity; magnitude depends on temperature of augmentation source",
+    "Argues for broadening environmental flows to include thermal regime; calls for optimization models for flow-temperature trade-offs",
+    "Seasonal regressions of 7DADM/7DADMAX vs. air temp + flow at 12 sites; T inversely correlated with Q except in winter; ≤1°C errors",
+    "Discharge increases up to 340 cms could reduce lower Sacramento temperatures by up to 3.6°C; late-spring and early-fall most manageable windows",
+    "Annual Sacramento River Temperature Management Plans: adaptive cold water pool operations at Shasta for winter-run Chinook; 56°F compliance target under WRO 90-5",
+    "RBM10 Trinity River temperature model; three flow augmentation scenarios under 1994 drought; 23°C thermal migration barrier identified; outputs linked to Klamath model",
+    "TRRP sustains summer dam releases for salmonid thermal refuge; 2002 Klamath kill led to emergency flow protocols tied to adult migration temperature thresholds",
+    "Juvenile salmonids moved to Beaver Creek cold-water refuge when Klamath mainstem exceeded 22–23°C; habitat selection within tolerance range, not at coldest water",
+    "Formalized flow components (Preventive, Responsive, Emergency) with defined volumes and triggers tied to temperature targets and disease risk during adult migration",
+    "CE-QUAL-W2 hydrodynamic models for Willamette mainstem and tributaries below USACE dams; identifies when/where temperatures most limiting for listed salmonids",
+    "Environmental flow studies prescribe rate, frequency, duration, and timing of dam releases for McKenzie and Santiam basins for thermal and ecological benefit",
+    "W3T tool quantifies temperature reduction credits from flow restoration; tested on John Day, Hood, Grande Ronde; endorsed by ODEQ for compliance",
+    "Experimental off-channel augmentation (13.9 L/s) prevented riffle drying, improved T and DO, increased coho/steelhead survival; controlled BACI design",
+    "Dworshak cold water (~43°F) released to cool Snake River below 68°F at Lower Granite; creates 4–6°C thermal stratification in downstream reservoirs; Nez Perce Tribe holds 200 kaf permanent right for augmentation",
+    "Radio-tagging showed outmigrating subyearling fall Chinook actively select cool-water refugia in reservoirs during Dworshak flow augmentation",
+    "Process-guided deep learning + data assimilation for 7-day probabilistic maximum T forecasts; RMSE 1.1–1.4°C at 1-day, 1.4–1.9°C at 7-day; run under baseline vs. +100 cfs release scenarios to anticipate threshold exceedances",
+    "Network-wide 7-day ahead forecasts at 70 DRB reaches; explicitly designed to inform cold-water reservoir release decisions for thermal habitat",
+    "Evaluated LSTM and RGCN architectures for forecasting at monitored and unmonitored locations; 522-day test period; 23.89°C threshold exceedance as management target",
+    "Regional-scale climate vulnerability assessment for tailwater T and flow below PNW federal dams; exceedance risk projected to increase 0.27 on average, duration by 10.3 days",
+    "Introduces 'cooling potential' concept (thermal energy a water body can absorb before exceeding threshold); larger outflow reservoirs depress T over longer distances; cooling potential declines under warming",
+    "Multi-objective optimization of Detroit Dam operations (N. Santiam, OR) using inflow + air T forecasts; derives release policies meeting hydropower + temperature constraints simultaneously"
+  ),
+  System = c(
+    "8 international river stations",
+    "Dairy McKay Watershed, Oregon",
+    "Lakes (generalizable)",
+    "Global review",
+    "10 Austrian catchments",
+    "410 USGS gages, CONUS",
+    "8 international river stations",
+    "Dairy McKay Watershed, Oregon",
+    "Nicola River, BC (regulated, semiarid)",
+    "Review — Pacific Northwest focus",
+    "Willamette River Basin, Oregon",
+    "Sacramento River, California",
+    "Sacramento / Trinity / Shasta system, CA",
+    "Trinity / Klamath Rivers, CA",
+    "Klamath and Trinity Rivers, CA",
+    "Klamath River, CA (Beaver Creek confluence)",
+    "Lower Klamath River, CA",
+    "Willamette River Basin, Oregon",
+    "McKenzie & Santiam Rivers, Oregon",
+    "John Day, Hood, Grande Ronde, Oregon",
+    "Porter Creek / Russian River, CA",
+    "Lower Snake River / Clearwater R., Idaho",
+    "Lower Snake River reservoirs, Idaho",
+    "Delaware River Basin, NY/PA",
+    "Delaware River Basin, NY/PA",
+    "Delaware River Basin, NY/PA",
+    "Pacific Northwest federal reservoirs",
+    "Southeastern US (generalizable)",
+    "Detroit Dam / N. Santiam River, Oregon"
+  ),
+  stringsAsFactors = FALSE
+)
+
+kable(lit_table,
+      col.names = c("Study", "Section", "Key finding", "System / context"),
+      align = c("l", "l", "l", "l"),
+      caption = "Summary of key literature across predictor variables, model approaches, flow augmentation, and operational forecasting.") |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = TRUE,
+    font_size = 13
+  ) |>
+  pack_rows("Section 1 — Predictor variables", 1, 4,
+            label_row_css = "background-color: #2c7a7b; color: white; font-weight: bold;") |>
+  pack_rows("Section 2 — Models used", 5, 8,
+            label_row_css = "background-color: #2c7a7b; color: white; font-weight: bold;") |>
+  pack_rows("Section 3 — Flow augmentation", 9, 23,
+            label_row_css = "background-color: #2c7a7b; color: white; font-weight: bold;") |>
+  pack_rows("Section 4 — Operational forecasting", 24, 29,
+            label_row_css = "background-color: #2c7a7b; color: white; font-weight: bold;") |>
+  column_spec(1, bold = TRUE, width = "20%") |>
+  column_spec(2, width = "16%") |>
+  column_spec(3, width = "44%") |>
+  column_spec(4, width = "20%")
+```
+
+---
+
+## References
+
+**Peer-reviewed literature**
+
+Ahmad, S.K., and Hossain, F. (2020). Realizing ecosystem-safe hydropower from dams through forecast-informed multi-objective optimization of operations. *PLOS ONE*. https://www.researchgate.net/publication/341883494_Realizing_ecosystem-safe_hydropower_from_dams
+
+Cheng, Y., et al. (2020). Reservoirs modify river thermal regime sensitivity to climate change: A case study in the southeastern United States. *Water Resources Research*, 56(6). https://doi.org/10.1029/2019WR025784
+
+Corson-Dosch, H.R., et al. (2023). Evaluating deep learning architecture and data assimilation for improving water temperature forecasts at unmonitored locations. *Frontiers in Water*, 5. https://doi.org/10.3389/frwa.2023.1184992
+
+Dalton, M.M., and Rounds, S.A. (2022). Estimating stream temperature in the Willamette River Basin, northwestern Oregon — A regression-based approach. *U.S. Geological Survey Scientific Investigations Report 2021-5022*. https://doi.org/10.3133/sir20215022
+
+East, A.E., et al. (2018). Will future climate change increase the risk of violating minimum flow and maximum temperature thresholds below dams in the Pacific Northwest? *Climate Risk Management*, 21, 45–57. https://doi.org/10.1016/j.crm.2018.05.003
+
+Garner, G., et al. (2025). Machine learning models for prediction of shade-affected stream temperatures. *Journal of Hydrologic Engineering*, 30(1). https://doi.org/10.1061/JHYEFF.HEENG-6227
+
+Kiernan, J.D., et al. (2023). Flow augmentation from off-channel storage improves salmonid habitat and survival. *bioRxiv*. https://doi.org/10.1101/2023.02.15.528508
+
+Leitner, P., et al. (2021). Machine-learning methods for stream water temperature prediction. *Hydrology and Earth System Sciences*, 25, 2951–2977. https://doi.org/10.5194/hess-25-2951-2021
+
+Michel, C.J., et al. (2022). Discharge-mediated temperature management in a large regulated river. *Water Resources Research*. https://repository.library.noaa.gov/view/noaa/58263
+
+Niel, A., et al. (2025). Machine learning in stream and river water temperature modeling: a review and metrics for evaluation. *Hydrology and Earth System Sciences*, 29, 2521–. https://doi.org/10.5194/hess-29-2521-2025
+
+Olden, J.D., and Naiman, R.J. (2010). Incorporating thermal regimes into environmental flows assessments: modifying dam operations to restore freshwater ecosystem integrity. *Freshwater Biology*, 55(1), 86–107. https://doi.org/10.1111/j.1365-2427.2009.02179.x
+
+Piccolroaz, S., et al. (2022). Critical factors for the use of machine learning to predict lake surface water temperature. *Journal of Hydrology*, 606. https://doi.org/10.1016/j.jhydrol.2021.127392
+
+Quilbé, R., et al. (2025). Cold-water thermal refuge enhancement and creation for salmonids: Successes, failures, and lessons learned. *River Research and Applications*. https://doi.org/10.1002/rra.4462
+
+Rounds, S.A., et al. (2022). Updates to models of streamflow and water temperature for 2011, 2015, and 2016 in rivers of the Willamette River Basin, Oregon. *U.S. Geological Survey Open-File Report 2022-1017*. https://doi.org/10.3133/ofr20221017
+
+Sutton, R.J., et al. (2007). Salmonid observations at a Klamath River thermal refuge under various hydrological and meteorological conditions. *River Research and Applications*, 23, 775–785. https://doi.org/10.1002/rra.1026
+
+Tiffan, K.F., et al. (2004). Effects of summer flow augmentation on the migratory behavior and distribution of subyearling fall Chinook salmon in Lower Granite Reservoir. *Report for Bonneville Power Administration*. https://www.osti.gov/servlets/purl/891401
+
+Ulaski, B., et al. (2023). Spatially variable effects of streamflow on water temperature and thermal sensitivity within a salmon-bearing watershed in interior British Columbia, Canada. *River Research and Applications*, 39(10), 2036–2047. https://doi.org/10.1002/rra.4200
+
+Wade, A.J., et al. (2023). Machine learning unravels controls on river water temperature regime dynamics. *Journal of Hydrology*. https://doi.org/10.1016/j.jhydrol.2023.129998
+
+Zhu, S., et al. (2019). Assessing the performance of a suite of machine learning models for daily river water temperature prediction. *PeerJ*, 7, e7065. https://doi.org/10.7717/peerj.7065
+
+Zwart, J.A., et al. (2023). Near-term forecasts of stream temperature using deep learning and data assimilation in support of management decisions. *JAWRA Journal of the American Water Resources Association*, 59(1), 145–162. https://doi.org/10.1111/1752-1688.13093
+
+---
+
+**Agency reports, operational documents, and technical publications**
+
+
+---
+
+**Agency reports, operational documents, and technical publications**
+
+Bureau of Reclamation (BOR). (2016). *2016 Lower Klamath River Late Summer Flow Augmentation Plan*. U.S. Bureau of Reclamation, Mid-Pacific Region. https://www.fisheries.noaa.gov/s3/2023-10/reclamation-s-request-to-implement-the-2016-lower-klamath-river-late-summer-flow-augmentation-august-22-2016.pdf
+
+Bureau of Reclamation (BOR). (2022). *Sacramento River Temperature Management Plan, Water Year 2022*. U.S. Bureau of Reclamation.
+
+Bureau of Reclamation (BOR). (2023). *Sacramento River Temperature Management Plan, Water Year 2023*. California State Water Resources Control Board. https://www.waterboards.ca.gov/waterrights/water_issues/programs/drought/sacramento_river/docs/2023/2023-sacramento-river-temperature-management-plan.pdf
+
+Flint, L.E., et al. (2016). *Construction, calibration, and validation of the RBM10 water temperature model for the Trinity River, northern California*. U.S. Geological Survey Open-File Report 2016-1056. https://pubs.usgs.gov/publication/ofr20161056
+
+Haller, G. (n.d.). *Dworshak and Brownlee hydro operations for Snake River fall Chinook*. Northwest Power and Conservation Council. https://www.nwcouncil.org/sites/default/files/dworshak.pdf
+
+Oliver, S.K., et al. (2023). *Predictions and supporting data for network-wide 7-day ahead forecasts of water temperature in the Delaware River Basin*. U.S. Geological Survey data release. https://doi.org/10.5066/P9NVEA4V
+
+Oliver, S.K., et al. (2023). *Predictions and supporting data for network-wide 7-day ahead forecasts of water temperature in the Delaware River Basin*. U.S. Geological Survey data release. https://doi.org/10.5066/P9NVEA4V
+
+Sacramento River Temperature Task Group (SRTTG). (2016). *Annual Report of Activities*. U.S. Bureau of Reclamation. https://cawaterlibrary.net/wp-content/uploads/2020/07/Final_SRTTG_2016_Annual_Report.pdf
+
+Sacramento River Temperature Task Group (SRTTG). (2018). *Annual Report of Activities*. U.S. Bureau of Reclamation. https://cawaterlibrary.net/wp-content/uploads/2020/06/FINAL_SRTTG_2018_Annual_Report_20181121.pdf
+
+The Freshwater Trust. (2014). *Oregon supports tool to estimate temperature benefits of restoring flow to rivers* [press release]. https://www.thefreshwatertrust.org/oregon-supports-tool-to-estimate-temperature-benefits-of-restoring-flow-to-rivers/
+
+Trinity River Restoration Program (TRRP). (n.d.). *Water temperature*. https://www.trrp.net/restoration/adaptive-management/water-temperature/
+
+U.S. Fish and Wildlife Service (USFWS). (2022). *Klamath Basin water temperature summary, 2019*. Arcata Fisheries Data Series Report DS 2022-68. https://www.fws.gov/sites/default/files/documents/2019H2OTempRpt_final_30Sep2022.pdf
+
+U.S. Geological Survey (USGS). (n.d.). *Environmental flow studies for Middle Fork Willamette, McKenzie, and Santiam River basins*. Oregon Water Science Center. https://www.usgs.gov/centers/oregon-water-science-center/science/environmental-flow-studies-middle-fork-willamette

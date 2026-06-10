@@ -1,0 +1,869 @@
+---
+title: "Weather Forecast Source Comparison — RM 8.5 / Camp Polk"
+author: "Maddee Rubenson (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+    fig_width: 10
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(zoo)
+library(here)
+library(knitr)
+library(whychusModel)
+library(reticulate)
+
+# Ensure Python packages are available in the reticulate managed environment
+py_require("pandas")
+py_require("numpy")
+py_require("requests")
+
+# ── Location ─────────────────────────────────────────────────────────────────
+LAT      <- 44.390278
+LON      <- -121.406792
+GRIDPT   <- "PDT/35,57"
+
+# ── Lead days used throughout ─────────────────────────────────────────────────
+LEAD_LABELS <- c("0" = "ERA5 / GFS Analysis", "1" = "Day 1", "3" = "Day 3", "7" = "Day 7")
+LEAD_COLORS <- c(
+  "ERA5 / GFS Analysis" = "darkgreen",
+  "Day 1"  = "#E24B4A",
+  "Day 3"  = "#888780",
+  "Day 7"  = "#378ADD"
+)
+
+# ── Shared theme ──────────────────────────────────────────────────────────────
+theme_fw <- function(...) {
+  theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.minor   = element_blank(),
+      strip.text         = element_text(face = "bold"),
+      legend.position    = "top",
+      plot.title         = element_text(face = "bold"),
+      plot.subtitle      = element_text(color = "grey40"),
+      plot.caption       = element_text(color = "grey60", size = 9),
+      ...
+    )
+}
+```
+
+---
+
+# Overview
+
+This document compares three weather forecast data sources used in (or considered for) the RM 8.5 instream temperature forecasting workflow:
+
+| Source | Description | Period | Access |
+|--------|-------------|--------|--------|
+| **Open-Meteo (GFS Seamless)** | Archived GFS model runs via Open-Meteo Historical Forecast API. Used as inputs to the RF model. | 2019–present | `get_historical_forecast()` |
+| **NWS API** | Official NWS gridded forecast for gridpoint PDT/35,57. Currently used for real-time predictions. | Logged May 2026–present | `get_nws_forecast()` |
+| **dynamical.org GFS** | Raw GFS forecast and analysis archived via Icechunk/Zarr. Accessed via Python. | May 2021–present | Python `icechunk` + `xarray` |
+
+**Location:** Whychus Creek RM 8.5 — `r LAT`°N, `r LON`°W
+**Variables of interest:** Max 2m air temperature, min 2m air temperature, cloud cover
+
+---
+
+# 1. Open-Meteo GFS Seamless — Historical Forecasts
+
+The `all_historical_forecasts` dataset contains archived GFS output from Open-Meteo at lead days 1, 3, and 7, plus ERA5 reanalysis as a baseline observation proxy. This is the training data used in the RF model.
+
+```{r open-meteo-load}
+# all_historical_forecasts: valid_date, issue_date, lead_days, variable, value, units, lat, lon, type
+hist_fc <- all_historical_forecasts |>
+  mutate(
+    lead_label = recode(as.character(lead_days), !!!LEAD_LABELS),
+    lead_label = factor(lead_label, levels = names(LEAD_COLORS)),
+    var_label  = recode(variable,
+      "temperature_2m_max" = "Max Air Temp (°C)",
+      "temperature_2m_min" = "Min Air Temp (°C)",
+      "cloud_cover_mean"   = "Cloud Cover (%)"
+    )
+  )
+
+hist_fc |>
+  group_by(var_label, lead_label) |>
+  summarise(
+    start     = min(valid_date, na.rm = TRUE),
+    end       = max(valid_date, na.rm = TRUE),
+    n         = n(),
+    n_missing = sum(is.na(value))
+  ) |>
+  kable(caption = "Open-Meteo historical forecast coverage by variable and lead time")
+```
+
+## Seasonal mean by lead time
+
+```{r open-meteo-seasonal, fig.height=7}
+plot_seasonal <- hist_fc |>
+  filter(!is.na(value)) |>
+  mutate(month = month(valid_date, label = TRUE)) |>
+  group_by(month, var_label, lead_label) |>
+  summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop")
+
+ggplot(plot_seasonal, aes(x = month, y = mean_value, color = lead_label, group = lead_label)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  facet_wrap(~var_label, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = LEAD_COLORS, name = "Lead time") +
+  labs(
+    title    = "Open-Meteo GFS Seamless — monthly mean by lead time",
+    subtitle = paste0("44.39°N, 121.41°W | ", min(hist_fc$valid_date, na.rm=T), " – ", max(hist_fc$valid_date, na.rm=T)),
+    x = NULL, y = NULL,
+    caption  = "Source: Open-Meteo Historical Forecast API (gfs_seamless); ERA5 reanalysis for lead 0"
+  ) +
+  theme_fw()
+```
+
+## Forecast error vs. ERA5 baseline by lead time
+
+Comparing each lead's forecast value against the ERA5 observed value for the same valid date quantifies how much forecast skill degrades with lead time at this location.
+
+```{r open-meteo-bias, fig.height=6}
+era5 <- hist_fc |>
+  filter(lead_days == 0) |>
+  select(valid_date, variable, obs = value)
+
+bias_df <- hist_fc |>
+  filter(lead_days > 0) |> 
+  inner_join(era5, by = c("valid_date", "variable")) |>
+  mutate(error = value - obs)
+
+bias_summary <- bias_df |>
+  group_by(var_label, lead_label) |>
+  summarise(
+    bias = mean(error, na.rm = TRUE),
+    mae  = mean(abs(error), na.rm = TRUE),
+    rmse = sqrt(mean(error^2, na.rm = TRUE)),
+    n    = n(),
+    .groups = "drop"
+  )
+
+kable(bias_summary, digits = 2,
+      caption = "Open-Meteo GFS vs. ERA5 — error metrics by variable and lead time")
+```
+
+```{r open-meteo-error-dist, eval=FALSE, fig.height=6, include=FALSE}
+bias_df |>
+  filter(variable %in% c("temperature_2m_max", "temperature_2m_min")) |>
+  ggplot(aes(x = error, fill = lead_label)) +
+  geom_histogram(binwidth = 0.5, alpha = 0.7, position = "identity") +
+  facet_grid(var_label ~ lead_label, scales = "free_y") +
+  scale_fill_manual(values = LEAD_COLORS, guide = "none") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey30") +
+  labs(
+    title   = "Forecast error distribution: GFS vs. ERA5",
+    x       = "Error (forecast − ERA5, °C)", y = "Count",
+    caption = "Positive = warm bias; negative = cool bias"
+  ) +
+  theme_fw()
+```
+
+---
+
+# 2. NWS Real-Time Forecast Log
+
+The NWS API (gridpoint PDT/35,57) is pulled daily by `run-daily-forecast.R`. Results are appended to `output/nws-forecasts-log.csv`. This section summarises the logged NWS forecasts and current real-time forecast.
+
+```{r nws-load}
+nws_log_path <- here("output", "nws-forecasts-log.csv")
+
+nws_log <- read_csv(nws_log_path, show_col_types = FALSE) |>
+  mutate(
+    run_date      = as.Date(run_date),
+    forecast_date = as.Date(forecast_date),
+    lead_days     = as.integer(lead_days)
+  )
+
+cat(sprintf("NWS log: %d rows | %s to %s\n",
+    nrow(nws_log), min(nws_log$run_date), max(nws_log$run_date)))
+```
+
+```{r nws-current}
+# Pull live NWS forecast — gracefully fall back to log if API is unavailable
+nws_live <- tryCatch({
+  bind_rows(
+    get_nws_forecast(GRIDPT, "maxTemperature") |> mutate(source = "NWS live"),
+    get_nws_forecast(GRIDPT, "minTemperature") |> mutate(source = "NWS live"),
+    get_nws_forecast(GRIDPT, "skyCover")       |> mutate(source = "NWS live")
+  )
+}, error = function(e) {
+  message("NWS API unavailable: ", e$message)
+  NULL
+})
+
+if (!is.null(nws_live)) {
+  cat(sprintf("Live NWS pull successful — %d rows, variables: %s\n",
+      nrow(nws_live), paste(unique(nws_live$variable), collapse = ", ")))
+} else {
+  cat("Using forecast log for NWS comparison.\n")
+}
+```
+
+## Logged NWS forecasts — daily max & min temperature
+
+```{r nws-log-plot, fig.height=5}
+nws_daily <- nws_log |>
+  filter(variable %in% c("maxTemperature", "minTemperature")) |>
+  group_by(run_date, forecast_date, lead_days, variable) |>
+  summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+  mutate(
+    var_label  = recode(variable,
+      "maxTemperature" = "Max Air Temp (°C)",
+      "minTemperature" = "Min Air Temp (°C)"
+    ),
+    lead_label = case_when(
+      lead_days == 0 ~ "Same day",
+      lead_days == 1 ~ "Day 1",
+      lead_days == 3 ~ "Day 3",
+      lead_days == 7 ~ "Day 7",
+      TRUE           ~ paste0("Day ", lead_days)
+    )
+  )
+
+# Summarise to one value per forecast_date × lead × variable (mean across run dates)
+nws_fc_summary <- nws_daily |>
+  group_by(forecast_date, lead_days, lead_label, var_label) |>
+  summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+  filter(lead_days %in% c(0, 1, 3, 7))
+
+ggplot(nws_fc_summary, aes(x = forecast_date, y = value,
+                            color = lead_label, group = lead_label)) +
+  geom_line(alpha = 0.7, linewidth = 0.7) +
+  facet_wrap(~var_label, ncol = 1, scales = "free_y") +
+  scale_color_brewer(palette = "Set1", name = "Lead") +
+  labs(
+    title    = "NWS API daily forecasts — logged runs",
+    subtitle = paste0("Gridpoint ", GRIDPT, " | ", min(nws_daily$run_date), " – ", max(nws_daily$run_date)),
+    x = NULL, y = NULL,
+    caption  = "Source: api.weather.gov"
+  ) +
+  theme_fw()
+```
+
+## Current live NWS forecast
+
+```{r nws-live-plot, fig.height=5}
+if (!is.null(nws_live)) {
+  nws_live |>
+    filter(variable %in% c("maxTemperature", "minTemperature", "skyCover")) |>
+    mutate(
+      forecast_date = as.Date(datetime, tz = "America/Los_Angeles"),
+      var_label = recode(variable,
+        "maxTemperature" = "Max Air Temp (°C)",
+        "minTemperature" = "Min Air Temp (°C)",
+        "skyCover"       = "Sky Cover (%)"
+      )
+    ) |>
+    group_by(forecast_date, var_label) |>
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+    ggplot(aes(x = forecast_date, y = value)) +
+    geom_line(color = "#185FA5", linewidth = 0.9) +
+    geom_point(color = "#185FA5", size = 2.5) +
+    facet_wrap(~var_label, ncol = 1, scales = "free_y") +
+    labs(
+      title    = paste("NWS live forecast — issued", Sys.Date()),
+      subtitle = paste0("Gridpoint ", GRIDPT),
+      x = NULL, y = NULL,
+      caption  = "Source: api.weather.gov"
+    ) +
+    theme_fw()
+} else {
+  cat("Live NWS forecast unavailable — skipping plot.\n")
+}
+```
+
+---
+
+# 3. dynamical.org GFS — Python Access
+
+dynamical.org archives the raw NOAA GFS model output in Icechunk/Zarr format on AWS S3. Two datasets are relevant:
+
+- **GFS Forecast** (`noaa-gfs-forecast`): initialized every 6 h, 0–384 h lead, from 2021-05-01 onward
+- **GFS Analysis** (`noaa-gfs-analysis`): analysis-time GFS fields (no lead time), 2021-05-01 onward
+
+Both datasets include `temperature_2m`, `maximum_temperature_2m`, `minimum_temperature_2m`, and `total_cloud_cover_atmosphere` at 0.25° resolution.
+
+> **Zarr store:** `s3://dynamical-noaa-gfs/noaa-gfs-forecast/v0.2.7.icechunk/`
+
+```{python dyn-setup}
+import warnings
+warnings.filterwarnings("ignore")
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta, timezone
+
+# Try dynamical package first, fall back to icechunk + xarray
+DYN_AVAILABLE = False
+ICE_AVAILABLE = False
+
+try:
+    import dynamical
+    DYN_AVAILABLE = True
+    print("dynamical package available")
+except ImportError:
+    print("dynamical not found — trying icechunk + xarray")
+
+try:
+    import icechunk
+    import xarray as xr
+    ICE_AVAILABLE = True
+    print("icechunk + xarray available")
+except ImportError:
+    print("icechunk not available")
+
+print(f"DYN_AVAILABLE={DYN_AVAILABLE}, ICE_AVAILABLE={ICE_AVAILABLE}")
+```
+
+```{python dyn-fetch-forecast}
+import pandas as pd
+import numpy as np
+
+# Target location
+LAT = 44.390278
+LON = -121.406792  # xarray typically wants 0-360; GFS uses -180 to 180
+
+dyn_fcst_df  = pd.DataFrame()
+dyn_anal_df  = pd.DataFrame()
+
+def open_gfs_forecast():
+    """Open GFS forecast via dynamical or icechunk, return xarray Dataset."""
+    if DYN_AVAILABLE:
+        return dynamical.open_dataset("noaa-gfs-forecast")
+    elif ICE_AVAILABLE:
+        storage = icechunk.StorageConfig.s3_anonymous(
+            bucket="dynamical-noaa-gfs",
+            prefix="noaa-gfs-forecast/v0.2.7.icechunk/",
+            region="us-east-1"
+        )
+        repo = icechunk.Repository.open(storage=storage)
+        return xr.open_zarr(repo.readonly_session(), consolidated=False)
+    else:
+        return None
+
+def open_gfs_analysis():
+    """Open GFS analysis via dynamical or icechunk, return xarray Dataset."""
+    if DYN_AVAILABLE:
+        return dynamical.open_dataset("noaa-gfs-analysis")
+    elif ICE_AVAILABLE:
+        # Fetch analysis STAC URL for the correct version
+        import requests
+        stac = requests.get(
+            "https://stac.dynamical.org/noaa-gfs-analysis/collection.json",
+            timeout=10
+        ).json()
+        href = stac["assets"]["zarr"]["href"]
+        storage = icechunk.StorageConfig.s3_anonymous(
+            bucket=href.split("/")[2],
+            prefix="/".join(href.split("/")[3:]),
+            region="us-east-1"
+        )
+        repo = icechunk.Repository.open(storage=storage)
+        return xr.open_zarr(repo.readonly_session(), consolidated=False)
+    else:
+        return None
+
+# ── GFS Forecast ────────────────────────────────────────────────────────────
+if DYN_AVAILABLE or ICE_AVAILABLE:
+    try:
+        import xarray as xr
+        ds_fcst = open_gfs_forecast()
+
+        if ds_fcst is not None:
+            print("GFS Forecast dataset opened")
+            print("Variables:", list(ds_fcst.data_vars)[:8])
+
+            # Pull the most recent 60 days of 00Z init runs at lead 1d, 3d, 7d
+            # init_time dimension, lead_time dimension
+            today_utc = pd.Timestamp.now(tz="UTC").floor("D")
+            start_init = today_utc - pd.Timedelta(days=60)
+
+            # Slice to our window and nearest point
+            point = ds_fcst.sel(
+                latitude=LAT, longitude=LON, method="nearest"
+            )
+
+            # Subset init times
+            init_times = pd.date_range(start=start_init, end=today_utc, freq="D")
+            init_times_avail = [t for t in init_times
+                                if t in point.init_time.values]
+
+            rows = []
+            vars_want = {
+                "maximum_temperature_2m" : "temperature_2m_max",
+                "minimum_temperature_2m" : "temperature_2m_min",
+                "total_cloud_cover_atmosphere": "cloud_cover_mean"
+            }
+            for lead_days in [1, 3, 7]:
+                lt = pd.Timedelta(days=lead_days)
+                for it in init_times_avail[:30]:  # limit to 30 init times for speed
+                    try:
+                        snap = point.sel(init_time=it, lead_time=lt, method="nearest")
+                        valid_dt = it + lt
+                        for raw_var, clean_var in vars_want.items():
+                            if raw_var in snap:
+                                val = float(snap[raw_var].values)
+                                # Convert K → °C for temperature
+                                if "temperature" in raw_var and val > 100:
+                                    val -= 273.15
+                                rows.append({
+                                    "source"    : "dynamical_gfs_forecast",
+                                    "init_date" : it.date(),
+                                    "valid_date": valid_dt.date(),
+                                    "lead_days" : lead_days,
+                                    "variable"  : clean_var,
+                                    "value"     : round(val, 3)
+                                })
+                    except Exception:
+                        pass
+
+            dyn_fcst_df = pd.DataFrame(rows)
+            print(f"GFS Forecast: {len(dyn_fcst_df)} rows")
+        else:
+            print("GFS Forecast dataset is None")
+
+    except Exception as e:
+        print(f"GFS Forecast fetch failed: {e}")
+else:
+    print("No Python data access packages available — skipping dynamical.org pull")
+    print("Install with: pip install dynamical  OR  pip install icechunk xarray")
+```
+
+```{python dyn-fetch-analysis}
+# ── GFS Analysis ─────────────────────────────────────────────────────────────
+if DYN_AVAILABLE or ICE_AVAILABLE:
+    try:
+        import xarray as xr
+        ds_anal = open_gfs_analysis()
+
+        if ds_anal is not None:
+            print("GFS Analysis dataset opened")
+
+            today_utc = pd.Timestamp.now(tz="UTC").floor("D")
+            start_anal = today_utc - pd.Timedelta(days=60)
+
+            point_anal = ds_anal.sel(
+                latitude=LAT, longitude=LON, method="nearest"
+            )
+
+            # time dimension (not init_time × lead_time)
+            time_slice = point_anal.sel(time=slice(start_anal, today_utc))
+
+            rows_a = []
+            vars_want = {
+                "maximum_temperature_2m" : "temperature_2m_max",
+                "minimum_temperature_2m" : "temperature_2m_min",
+                "total_cloud_cover_atmosphere": "cloud_cover_mean"
+            }
+            # Resample to daily
+            for raw_var, clean_var in vars_want.items():
+                if raw_var not in time_slice:
+                    continue
+                agg = "max" if "maximum" in raw_var else (
+                      "min" if "minimum" in raw_var else "mean")
+                daily = getattr(time_slice[raw_var].resample(time="1D"), agg)()
+                vals = daily.compute().values.tolist()
+                dates = [pd.Timestamp(t).date() for t in daily.time.values]
+                for d, v in zip(dates, vals):
+                    if v is not None and not np.isnan(v):
+                        fval = float(v)
+                        if "temperature" in raw_var and fval > 100:
+                            fval -= 273.15
+                        rows_a.append({
+                            "source"    : "dynamical_gfs_analysis",
+                            "valid_date": d,
+                            "variable"  : clean_var,
+                            "value"     : round(fval, 3)
+                        })
+
+            dyn_anal_df = pd.DataFrame(rows_a)
+            print(f"GFS Analysis: {len(dyn_anal_df)} rows")
+
+    except Exception as e:
+        print(f"GFS Analysis fetch failed: {e}")
+```
+
+```{r dyn-to-r}
+# Pull Python DataFrames into R
+dyn_fcst <- tryCatch(py$dyn_fcst_df, error = function(e) NULL)
+dyn_anal <- tryCatch(py$dyn_anal_df, error = function(e) NULL)
+
+# Convert to tibble and fix types
+clean_dyn_df <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  df |>
+    as_tibble() |>
+    mutate(across(any_of(c("valid_date", "init_date")), as.Date))
+}
+
+dyn_fcst <- clean_dyn_df(dyn_fcst)
+dyn_anal <- clean_dyn_df(dyn_anal)
+
+cat(sprintf("dynamical.org GFS Forecast: %d rows\n", if (is.null(dyn_fcst)) 0L else nrow(dyn_fcst)))
+cat(sprintf("dynamical.org GFS Analysis: %d rows\n", if (is.null(dyn_anal)) 0L else nrow(dyn_anal)))
+
+# If Python packages unavailable, note it
+if (is.null(dyn_fcst)) {
+  cat("\nNote: dynamical.org data could not be fetched.\n")
+  cat("Install Python packages to enable this section:\n")
+  cat("  pip install dynamical\n")
+  cat("  OR\n")
+  cat("  pip install icechunk xarray\n")
+}
+```
+
+## dynamical.org GFS forecast — recent 60 days
+
+```{r dyn-fcst-plot, fig.height=7}
+if (!is.null(dyn_fcst) && nrow(dyn_fcst) > 0) {
+  dyn_fcst |>
+    mutate(
+      var_label  = recode(variable,
+        "temperature_2m_max"  = "Max Air Temp (°C)",
+        "temperature_2m_min"  = "Min Air Temp (°C)",
+        "cloud_cover_mean"    = "Cloud Cover (%)"
+      ),
+      lead_label = paste("Day", lead_days)
+    ) |>
+    ggplot(aes(x = valid_date, y = value, color = lead_label, group = lead_label)) +
+    geom_line(alpha = 0.8, linewidth = 0.8) +
+    geom_point(size = 1.5, alpha = 0.6) +
+    facet_wrap(~var_label, ncol = 1, scales = "free_y") +
+    scale_color_brewer(palette = "Dark2", name = "Lead") +
+    labs(
+      title    = "dynamical.org GFS Forecast — recent 60 days",
+      subtitle = paste0(LAT, "°N, ", abs(LON), "°W | lead_time = 1d, 3d, 7d"),
+      x = NULL, y = NULL,
+      caption  = "Source: dynamical.org noaa-gfs-forecast (s3://dynamical-noaa-gfs)"
+    ) +
+    theme_fw()
+} else {
+  cat("dynamical.org GFS forecast data not available for plotting.\n")
+}
+```
+
+## dynamical.org GFS analysis — recent 60 days
+
+```{r dyn-anal-plot, fig.height=7}
+if (!is.null(dyn_anal) && nrow(dyn_anal) > 0) {
+  dyn_anal |>
+    mutate(
+      var_label = recode(variable,
+        "temperature_2m_max"  = "Max Air Temp (°C)",
+        "temperature_2m_min"  = "Min Air Temp (°C)",
+        "cloud_cover_mean"    = "Cloud Cover (%)"
+      )
+    ) |>
+    ggplot(aes(x = valid_date, y = value)) +
+    geom_line(color = "darkgreen", linewidth = 0.9) +
+    geom_point(color = "darkgreen", size = 1.5) +
+    facet_wrap(~var_label, ncol = 1, scales = "free_y") +
+    labs(
+      title    = "dynamical.org GFS Analysis — recent 60 days",
+      subtitle = paste0(LAT, "°N, ", abs(LON), "°W"),
+      x = NULL, y = NULL,
+      caption  = "Source: dynamical.org noaa-gfs-analysis (s3://dynamical-noaa-gfs)"
+    ) +
+    theme_fw()
+} else {
+  cat("dynamical.org GFS analysis data not available for plotting.\n")
+}
+```
+
+---
+
+# 4. Cross-Source Comparison
+
+## 4a. NWS vs. dynamical.org GFS — overlapping period
+
+The NWS API returns the official forecast with MOS post-processing and human adjustments. The dynamical.org GFS forecast is raw model output. Both should be similar for the same valid date and lead, but differences reflect NWS post-processing.
+
+```{r nws-vs-dyn, fig.height=7}
+if (!is.null(dyn_fcst) && nrow(dyn_fcst) > 0) {
+
+  # Standardise NWS log to same schema
+  nws_std <- nws_log |>
+    filter(variable %in% c("maxTemperature", "minTemperature")) |>
+    group_by(run_date, forecast_date, lead_days, variable) |>
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+    mutate(
+      variable  = recode(variable,
+        "maxTemperature" = "temperature_2m_max",
+        "minTemperature" = "temperature_2m_min"
+      ),
+      source = "NWS API (weather.gov)"
+    ) |>
+    rename(valid_date = forecast_date, init_date = run_date)
+
+  # Standardise dynamical GFS forecast
+  dyn_std <- dyn_fcst |>
+    filter(variable %in% c("temperature_2m_max", "temperature_2m_min")) |>
+    mutate(source = "dynamical.org GFS forecast") |>
+    rename(init_date = init_date)
+
+  combined <- bind_rows(nws_std, dyn_std) |>
+    filter(lead_days %in% c(1, 3, 7)) |>
+    mutate(
+      var_label  = recode(variable,
+        "temperature_2m_max" = "Max Air Temp (°C)",
+        "temperature_2m_min" = "Min Air Temp (°C)"
+      ),
+      lead_label = paste("Day", lead_days)
+    )
+
+  # Need one value per source × valid_date × lead × variable
+  combined_daily <- combined |>
+    group_by(source, valid_date, lead_days, lead_label, var_label) |>
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop")
+
+  ggplot(combined_daily,
+         aes(x = valid_date, y = value, color = source, group = source)) +
+    geom_line(alpha = 0.8, linewidth = 0.8) +
+    facet_grid(var_label ~ lead_label, scales = "free_y") +
+    scale_color_manual(
+      values = c("NWS API (weather.gov)"       = "#C93312",
+                 "dynamical.org GFS forecast"  = "#378ADD"),
+      name = NULL
+    ) +
+    labs(
+      title    = "NWS API vs. dynamical.org GFS — temperature forecast comparison",
+      subtitle = paste0("Lead = 1, 3, 7 days | Overlapping period"),
+      x = NULL, y = NULL,
+      caption  = "NWS = GFS + MOS post-processing; dynamical.org = raw GFS output"
+    ) +
+    theme_fw()
+
+} else {
+  cat("dynamical.org data unavailable — NWS vs. GFS comparison skipped.\n")
+
+  # Still show NWS log summary across run dates
+  nws_log |>
+    filter(variable %in% c("maxTemperature", "minTemperature"),
+           lead_days %in% c(1, 3, 7)) |>
+    group_by(forecast_date, lead_days, variable) |>
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+    mutate(
+      var_label  = recode(variable,
+        "maxTemperature" = "Max Air Temp (°C)",
+        "minTemperature" = "Min Air Temp (°C)"
+      ),
+      lead_label = paste("Day", lead_days)
+    ) |>
+    ggplot(aes(x = forecast_date, y = value, color = lead_label)) +
+    geom_line(linewidth = 0.8) +
+    facet_grid(var_label ~ ., scales = "free_y") +
+    scale_color_brewer(palette = "Dark2", name = "Lead") +
+    labs(
+      title    = "NWS API forecast log — logged runs",
+      subtitle = paste0("Gridpoint ", GRIDPT),
+      x = NULL, y = NULL
+    ) +
+    theme_fw()
+}
+```
+
+## 4b. NWS vs. dynamical.org — difference scatter plot
+
+```{r nws-dyn-scatter, fig.height=5}
+if (!is.null(dyn_fcst) && nrow(dyn_fcst) > 0) {
+
+  nws_daily_tmax <- nws_log |>
+    filter(variable == "maxTemperature") |>
+    group_by(forecast_date, lead_days) |>
+    summarise(nws_tmax = mean(value, na.rm = TRUE), .groups = "drop")
+
+  dyn_daily_tmax <- dyn_fcst |>
+    filter(variable == "temperature_2m_max") |>
+    group_by(valid_date, lead_days) |>
+    summarise(dyn_tmax = mean(value, na.rm = TRUE), .groups = "drop")
+
+  joined <- inner_join(
+    nws_daily_tmax |> rename(valid_date = forecast_date),
+    dyn_daily_tmax,
+    by = c("valid_date", "lead_days")
+  ) |>
+    filter(lead_days %in% c(1, 3, 7)) |>
+    mutate(lead_label = paste("Day", lead_days))
+
+  if (nrow(joined) > 3) {
+    ggplot(joined, aes(x = dyn_tmax, y = nws_tmax, color = lead_label)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey50") +
+      geom_point(size = 2.5, alpha = 0.7) +
+      geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+      facet_wrap(~lead_label) +
+      scale_color_brewer(palette = "Dark2", guide = "none") +
+      labs(
+        title   = "NWS vs. dynamical.org GFS — max temperature scatter",
+        x       = "dynamical.org GFS Tmax (°C)",
+        y       = "NWS API Tmax (°C)",
+        caption = "Dashed line = 1:1; points above line = NWS warmer than raw GFS"
+      ) +
+      theme_fw()
+  } else {
+    cat("Insufficient overlapping data for scatter plot.\n")
+  }
+
+} else {
+  cat("dynamical.org data unavailable — scatter plot skipped.\n")
+}
+```
+
+## 4c. Open-Meteo GFS vs. dynamical.org GFS — model alignment
+
+Open-Meteo (`gfs_seamless`) and dynamical.org both archive GFS output but with different processing pipelines. For the overlapping period (May 2021 onward), we expect similar but not identical values due to spatial downscaling differences.
+
+```{r openmeteo-vs-dyn, fig.height=7}
+if (!is.null(dyn_fcst) && nrow(dyn_fcst) > 0) {
+
+  # Open-Meteo historical at lead 1, 3, 7 — post-2021
+  om_recent <- hist_fc |>
+    filter(lead_days %in% c(1, 3, 7),
+           valid_date >= as.Date("2021-05-01"),
+           variable %in% c("temperature_2m_max", "temperature_2m_min", "cloud_cover_mean")) |>
+    mutate(source = "Open-Meteo GFS seamless") |>
+    select(source, valid_date, lead_days, variable, value)
+
+  dyn_std2 <- dyn_fcst |>
+    filter(variable %in% c("temperature_2m_max", "temperature_2m_min", "cloud_cover_mean")) |>
+    mutate(source = "dynamical.org GFS forecast") |>
+    select(source, valid_date, lead_days, variable, value)
+
+  both <- bind_rows(om_recent, dyn_std2) |>
+    filter(lead_days %in% c(1, 3, 7)) |>
+    mutate(
+      var_label  = recode(variable,
+        "temperature_2m_max" = "Max Air Temp (°C)",
+        "temperature_2m_min" = "Min Air Temp (°C)",
+        "cloud_cover_mean"   = "Cloud Cover (%)"
+      ),
+      lead_label = paste("Day", lead_days)
+    ) |>
+    group_by(source, valid_date, lead_days, lead_label, var_label) |>
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop")
+
+  ggplot(both, aes(x = valid_date, y = value, color = source)) +
+    geom_line(alpha = 0.7, linewidth = 0.7) +
+    facet_grid(var_label ~ lead_label, scales = "free_y") +
+    scale_color_manual(
+      values = c("Open-Meteo GFS seamless"     = "#888780",
+                 "dynamical.org GFS forecast"  = "#378ADD"),
+      name = NULL
+    ) +
+    labs(
+      title    = "Open-Meteo GFS seamless vs. dynamical.org GFS — model alignment",
+      subtitle = "Same underlying model, different processing pipelines",
+      x = NULL, y = NULL,
+      caption  = "Differences reflect spatial downscaling and potential ECMWF blending in Open-Meteo seamless"
+    ) +
+    theme_fw()
+
+} else {
+  cat("dynamical.org data unavailable — Open-Meteo vs. dynamical.org comparison skipped.\n")
+
+  # Show Open-Meteo alone for the recent period
+  hist_fc |>
+    filter(lead_days %in% c(1, 3, 7),
+           valid_date >= as.Date("2021-05-01"),
+           variable %in% c("temperature_2m_max", "temperature_2m_min")) |>
+    mutate(month = month(valid_date, label = TRUE)) |>
+    group_by(month, var_label, lead_label) |>
+    summarise(mean_value = mean(value, na.rm = TRUE), .groups = "drop") |> invisible()
+
+  # fallback plot if dyn not available - already shown above, skip
+  cat("Open-Meteo data shown in Section 1.\n")
+}
+```
+
+---
+
+# 5. Forecast Skill by Lead Time
+
+Across sources, forecast skill for air temperature degrades with increasing lead time. This section quantifies that degradation for the Open-Meteo archive (largest historical record).
+
+```{r skill-table}
+skill <- bias_df |>
+  group_by(var_label, lead_days) |>
+  summarise(
+    n        = n(),
+    bias     = round(mean(error, na.rm = TRUE), 2),
+    mae      = round(mean(abs(error), na.rm = TRUE), 2),
+    rmse     = round(sqrt(mean(error^2, na.rm = TRUE)), 2),
+    r        = tryCatch(round(cor(value, obs, use = "complete.obs"), 3), error = function(e) NA_real_),
+    .groups  = "drop"
+  )
+
+kable(skill, caption = "GFS forecast skill vs. ERA5 baseline by lead time (Open-Meteo archive)",
+      col.names = c("Variable", "Lead (days)", "N", "Bias (°C)", "MAE (°C)", "RMSE (°C)", "r"))
+```
+
+```{r skill-plot, fig.height=5}
+skill_temp <- skill |> filter(grepl("Temp", var_label))
+if (nrow(skill_temp) > 0) {
+  skill_temp |>
+    pivot_longer(c(bias, mae, rmse), names_to = "metric", values_to = "val") |>
+    mutate(metric = factor(metric, levels = c("bias", "mae", "rmse"),
+                            labels = c("Bias", "MAE", "RMSE"))) |>
+    ggplot(aes(x = lead_days, y = val, color = var_label, group = var_label)) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 3) +
+    facet_wrap(~metric, scales = "free_y") +
+    scale_x_continuous(breaks = c(1, 3, 7)) +
+    scale_color_manual(values = c("#C93312", "#378ADD"), name = NULL) +
+    labs(
+      title   = "Forecast error metrics by lead time",
+      x       = "Lead time (days)", y = NULL,
+      caption = "Source: Open-Meteo Historical Forecast API vs. ERA5 reanalysis"
+    ) +
+    theme_fw()
+} else {
+  cat("No ERA5 baseline available — forecast skill plot skipped.\n")
+}
+```
+
+---
+
+# 6. Source Summary and Recommendations
+
+```{r summary-table, echo=FALSE}
+summary_tbl <- tribble(
+  ~Source,              ~`Data type`,     ~`Temporal coverage`,  ~`Lead times`,     ~`Resolution`, ~`Access`,         ~`Notes`,
+  "Open-Meteo GFS seamless", "Historical archive", "2019–present",  "1, 3, 7 d",       "~25 km",      "R: `get_historical_forecast()`", "ERA5 baseline pre-2019; blends ECMWF at longer leads",
+  "NWS API (weather.gov)", "Real-time forecast",  "Logged May 2026+", "0–7+ d",        "~2.5 km",     "R: `get_nws_forecast()`",       "MOS post-processing; human adjustments",
+  "dynamical.org GFS forecast", "Real-time + archive", "May 2021–present", "0–384 h", "~25 km",      "Python: `dynamical` or `icechunk+xarray`", "Raw GFS; hourly → 3-hourly",
+  "dynamical.org GFS analysis", "Analysis (no lead)",  "May 2021–present", "n/a",     "~25 km",      "Python: `dynamical` or `icechunk+xarray`", "Best available GFS-grid observation proxy"
+)
+
+kable(summary_tbl, caption = "Weather forecast source comparison")
+```
+
+**Key differences between sources:**
+
+- **NWS vs. raw GFS:** NWS applies MOS bias correction and human edits, particularly for temperature. Expect NWS to be 1–3°C warmer/cooler than raw GFS on any given day. For real-time forecasting, NWS is operationally tested and locally calibrated — preferred for the current RF model.
+
+- **Open-Meteo vs. dynamical.org GFS:** Both derive from GFS but Open-Meteo applies statistical downscaling and blends ECMWF at lead > ~5 days. Dynamical.org is closer to the raw GFS grid output. The Open-Meteo archive is suitable for model training; dynamical.org's analysis product provides a useful cross-check.
+
+- **Temporal depth:** For training the RF model, Open-Meteo (2019–present) provides the longest GFS-archive record. ERA5 extends coverage to 2011 at the cost of swapping from a forecast to a reanalysis product.
+
+**Recommendation for RM 8.5 model:**
+- Continue using `get_nws_forecast()` (NWS API) for real-time predictions — it is operationally reliable and already integrated.
+- Use Open-Meteo GFS seamless (`get_historical_forecast()`) for training data — longest consistent archive.
+- Use dynamical.org GFS analysis as a secondary validation benchmark for recent years (2021–present) where both sources overlap.
+
+---
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```

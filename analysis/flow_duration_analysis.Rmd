@@ -61,7 +61,102 @@ model_dir      <- here("output")
 
 ---
 
-## 1. Historical RM 8.5 Exceedances
+## 1. Flow, Air Temperature & Stream Temperature
+
+Before stepping through the model-based counterfactual analysis, it helps to see how the three key variables — Camp Polk flow, air temperature, and RM 8.5 stream temperature — relate to each other across the warm season. The raw paired record from 2012 to 2025 tells a nuanced story: air temperature is the dominant driver of stream temperature, and flow modulates it.
+
+```{r flow-temp-prep, include=FALSE}
+load("~/Documents/git/udwc_temperature/data/all_rm_8_5_dates_and_times.rda")
+
+rm85_dadm_base <- all_rm_8_5_dates_and_times |>
+  mutate(date = as.Date(date), temp_c = temperature) |>
+  filter(!is.na(date), !is.na(temp_c)) |>
+  group_by(date) |>
+  summarise(tmax = max(temp_c, na.rm = TRUE), .groups = "drop") |>
+  arrange(date) |>
+  mutate(dadm_7 = rollmean(tmax, k = 7, fill = NA, align = "right"))
+
+air_temp_daily <- all_historical_forecasts |>
+  filter(variable == "temperature_2m_max") |>
+  group_by(valid_date) |>
+  summarise(air_max = mean(value, na.rm = TRUE), .groups = "drop") |>
+  rename(date = valid_date)
+
+flow_temp_joined <- camp_polk_flow_historical |>
+  filter(statistic == "mean") |>
+  select(date, flow_cfs) |>
+  inner_join(rm85_dadm_base |> select(date, dadm_7), by = "date") |>
+  inner_join(air_temp_daily, by = "date") |>
+  filter(month(date) %in% 6:9, !is.na(flow_cfs), !is.na(dadm_7), !is.na(air_max)) |>
+  mutate(
+    month_name = factor(month(date, label = TRUE, abbr = TRUE),
+                        levels = c("Jun", "Jul", "Aug", "Sep")),
+    year = year(date)
+  )
+
+flow_breaks <- quantile(flow_temp_joined$flow_cfs, c(0, 1/3, 2/3, 1), na.rm = TRUE)
+flow_temp_joined <- flow_temp_joined |>
+  mutate(flow_bin = cut(flow_cfs, breaks = flow_breaks,
+                        labels = c("Low flow (≤33rd pctile)",
+                                   "Medium flow (33–67th pctile)",
+                                   "High flow (≥67th pctile)"),
+                        include.lowest = TRUE))
+
+flow_bin_colors <- c(
+  "Low flow (≤33rd pctile)"    = "#d73027",
+  "Medium flow (33–67th pctile)" = "#fdae61",
+  "High flow (≥67th pctile)"   = "#4575b4"
+)
+```
+
+A simple scatter of flow versus stream temperature would suggest a negative relationship: higher flows tend to coincide with cooler water. But that pattern is largely a seasonal artifact. Camp Polk flows naturally peak in late May–June with snowmelt and then decline through August as the snowpack is exhausted and irrigation withdrawals intensify. Air temperatures follow the opposite trajectory — rising through July and August and driving stream warming independently of flow. The apparent flow-temperature correlation is, to a meaningful degree, a proxy for time of year.
+
+Figure 1 reframes the question by putting air temperature on the x-axis — where it belongs as the dominant driver. Stream temperature rises steeply with air temperature. Flow matters, but as a modifier: at any given air temperature, high-flow days (blue) run cooler than low-flow days (red), and the gap is most pronounced at moderate air temperatures.
+
+```{r flow-temp-scatter, fig.cap="**Figure 1.** Daily maximum air temperature versus RM 8.5 7DADM across all warm-season (Jun–Sep) observations, 2012–2025. Points and LOESS smooth lines colored by Camp Polk flow level (tertiles). Air temperature is the primary driver of stream temperature. Flow modulates it: at any given air temperature, higher Camp Polk flows are associated with cooler downstream temperatures. The gap between flow levels narrows as air temperatures exceed ~28°C, where atmospheric forcing increasingly overwhelms the cooling effect of upstream releases."}
+ggplot(flow_temp_joined, aes(x = air_max, y = dadm_7, color = flow_bin)) +
+  geom_point(alpha = 0.30, size = 1.4) +
+  geom_smooth(method = "loess", span = 0.7, se = FALSE, linewidth = 1.2) +
+  geom_hline(yintercept = 20, linetype = "dashed",
+             color = "#c0392b", linewidth = 0.8) +
+  annotate("text", x = Inf, y = 20.4, label = "20°C HCP threshold",
+           hjust = 1, vjust = -0.3, color = "#c0392b", size = 3.2) +
+  scale_color_manual(values = flow_bin_colors, name = "Camp Polk flow") +
+  labs(
+    title    = "Air temperature vs. RM 8.5 7DADM — warm season, all years",
+    subtitle = "2012–2025  |  June–September  |  colored by Camp Polk flow level",
+    x        = "Daily maximum air temperature near Camp Polk (°C)",
+    y        = "RM 8.5 7DADM (°C)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+Figure 2 shows the same data with axes swapped — flow on the x-axis as one might expect — but with air temperature shown as a continuous color scale. Within each month panel, it is the hottest air temperature days (red) that drive the highest stream temperatures, not simply the low-flow days. The flow-temperature gradient within a month is real but secondary; air temperature is doing most of the work.
+
+```{r flow-temp-by-month, fig.height=6, fig.cap="**Figure 2.** Camp Polk flow versus RM 8.5 7DADM faceted by month. Points colored by daily maximum air temperature (blue = cool, red = hot). Within each panel, stream temperature tracks air temperature closely: high-temperature days (red) cluster near or above the 20°C threshold regardless of flow level, while cool air temperature days (blue) tend to stay below it even at modest flows. The actionable flow signal sits between those extremes."}
+ggplot(flow_temp_joined, aes(x = flow_cfs, y = dadm_7)) +
+  geom_point(aes(color = air_max), alpha = 0.55, size = 1.4) +
+  geom_hline(yintercept = 20, linetype = "dashed", color = "#c0392b") +
+  scale_x_log10(labels = scales::comma) +
+  scale_color_gradient2(low = "#4575b4", mid = "#ffffbf", high = "#d73027",
+                        midpoint = 25, name = "Max air\ntemp (°C)") +
+  facet_wrap(~month_name, ncol = 2) +
+  labs(
+    title    = "Camp Polk flow vs. RM 8.5 7DADM by month — colored by air temperature",
+    subtitle = "2012–2025  |  June–September  |  x-axis on log scale",
+    x        = "Camp Polk mean daily flow (cfs, log scale)",
+    y        = "RM 8.5 7DADM (°C)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), legend.position = "right")
+```
+
+The practical takeaway from both figures: **flow management is most effective when air temperatures are in the moderate range — roughly 20–28°C — where cool upstream water can still move the needle on RM 8.5 temperatures.** When air temperatures are extreme, even sustained high flows provide limited relief. The model-based analysis that follows quantifies exactly where that boundary falls and which historical exceedance events fall on which side of it.
+
+---
+
+## 2. Historical RM 8.5 Exceedances
 
 ```{r load-data}
 load("~/Documents/git/udwc_temperature/data/all_rm_8_5_dates_and_times.rda")
@@ -96,7 +191,7 @@ Exceedances are concentrated in the mid-June through August window and vary
 considerably by year, with some summers largely compliant and others sustaining
 multi-week exceedance periods.
 
-```{r exceedance-timeseries, fig.cap="**Figure 1.** Full-record RM 8.5 7-day average daily maximum temperature (7DADM). Orange line = 7DADM; red shading = periods exceeding the 20°C HCP threshold (dashed line). Exceedances cluster in mid-summer and vary considerably year to year."}
+```{r exceedance-timeseries, fig.cap="**Figure 3.** Full-record RM 8.5 7-day average daily maximum temperature (7DADM). Orange line = 7DADM; red shading = periods exceeding the 20°C HCP threshold (dashed line). Exceedances cluster in mid-summer and vary considerably year to year."}
 exceed_ts <- rm85_dadm_all |>
   filter(!is.na(dadm_7))
 
@@ -115,7 +210,7 @@ ggplot(exceed_ts, aes(x = date, y = dadm_7)) +
   theme(panel.grid.minor = element_blank())
 ```
 
-```{r airtemp-timeseries, fig.cap="**Figure 2.** Historical daily air temperature near Camp Polk (2 m). Blue ribbon = daily min–max range; dark line = daily maximum. Values averaged across available forecast lead times for each calendar date."}
+```{r airtemp-timeseries, fig.cap="**Figure 4.** Historical daily air temperature near Camp Polk (2 m). Blue ribbon = daily min–max range; dark line = daily maximum. Values averaged across available forecast lead times for each calendar date."}
 air_temp_hist <- all_historical_forecasts |>
   filter(variable %in% c("temperature_2m_max", "temperature_2m_min")) |>
   group_by(valid_date, variable) |>
@@ -134,7 +229,7 @@ ggplot(air_temp_hist, aes(x = valid_date)) +
   theme(panel.grid.minor = element_blank())
 ```
 
-```{r flow-timeseries, fig.cap="**Figure 3.** Historical mean daily Camp Polk flow (OWRD gage)."}
+```{r flow-timeseries, fig.cap="**Figure 5.** Historical mean daily Camp Polk flow (OWRD gage)."}
 flow_hist <- camp_polk_flow_historical |>
   filter(statistic == "mean", !is.na(flow_cfs))
 
@@ -149,7 +244,7 @@ ggplot(flow_hist, aes(x = date, y = flow_cfs)) +
 
 ---
 
-## 2. A 2024 Exceedance — Setting the Stage
+## 3. A 2024 Exceedance — Setting the Stage
 
 ```{r cp-temp-model}
 # TODO: this could potentially be better -- current r2 is 0.2
@@ -185,7 +280,7 @@ The peak 7DADM in summer 2024 occurred on **`r format(anchor_date, "%B %d, %Y")`
 **`r anchor_dadm`°C** — `r round(anchor_dadm - target_C, 1)`°C above the 20°C standard.
 This event anchors the worked example in the next section.
 
-```{r anchor-plot, fig.cap="**Figure 4.** RM 8.5 temperature and Camp Polk flow over summer 2024. Orange line = 7DADM; grey line = daily max; blue bars = mean daily Camp Polk flow (right axis). The red shaded band highlights the 7-day averaging window that produced the peak exceedance. The dashed red line marks the 20°C HCP threshold."}
+```{r anchor-plot, fig.cap="**Figure 6.** RM 8.5 temperature and Camp Polk flow over summer 2024. Orange line = 7DADM; grey line = daily max; blue bars = mean daily Camp Polk flow (right axis). The red shaded band highlights the 7-day averaging window that produced the peak exceedance. The dashed red line marks the 20°C HCP threshold."}
 band_start     <- anchor_date - 6
 cp_flow_window <- camp_polk_flow_historical |>
   filter(statistic == "mean", date >= analysis_start, date <= analysis_end)
@@ -224,7 +319,7 @@ rm85_daily_max |>
 
 ---
 
-## 3. What Flow Would Have Prevented the Exceedance?
+## 4. What Flow Would Have Prevented the Exceedance?
 
 For each forecast lead (1, 3, and 7 days before the anchor event), air temperature and
 cloud cover are fixed at their observed historical values. Camp Polk flow is swept across
@@ -323,7 +418,7 @@ obs_pred_df <- sweep_df |>
   ungroup()
 ```
 
-```{r anchor-sweep-plot, fig.cap="**Figure 5.** Predicted RM 8.5 7DADM as a function of sustained Camp Polk flow at each forecast lead, with all non-flow conditions fixed at their observed values for the anchor event. Dashed red line = 20°C HCP threshold. Vertical dotted lines = minimum sustained flow needed to reach the threshold (shown only where achievable). Filled circles = model prediction at the flow that actually occurred on each run date."}
+```{r anchor-sweep-plot, fig.cap="**Figure 7.** Predicted RM 8.5 7DADM as a function of sustained Camp Polk flow at each forecast lead, with all non-flow conditions fixed at their observed values for the anchor event. Dashed red line = 20°C HCP threshold. Vertical dotted lines = minimum sustained flow needed to reach the threshold (shown only where achievable). Filled circles = model prediction at the flow that actually occurred on each run date."}
 lead_colors <- c("1" = "#D4A853", "3" = "#C07038", "7" = "#185FA5")
 lead_labels <- c("1" = "1-day lead", "3" = "3-day lead", "7" = "7-day lead")
 threshold_crossings <- filter(threshold_df, crosses)
@@ -406,7 +501,7 @@ if (any_cross) {
 
 ---
 
-## 4. Does This Pattern Hold Across Years?
+## 5. Does This Pattern Hold Across Years?
 
 The worked example above describes one event. This section runs the same RF flow sweep — with Camp Polk water temperature
 co-varied with flow — across all **`r nrow(rm85_dadm_all |> filter(dadm_7 > target_C, !is.na(dadm_7)))`
@@ -517,7 +612,7 @@ sweep_results |>
   )
 ```
 
-```{r seasonal-rate-plot, fig.cap="**Figure 6.** Smoothed probability that a flow action can prevent an RM 8.5 7DADM exceedance"}
+```{r seasonal-rate-plot, fig.cap="**Figure 8.** Smoothed probability that a flow action can prevent an RM 8.5 7DADM exceedance"}
 sweep_results |>
   mutate(lead_f = factor(paste0(lead_days, "-day lead"),
                          levels = c("1-day lead", "3-day lead", "7-day lead"))) |>
@@ -553,7 +648,7 @@ Two patterns emerge from the historical record:
 
 ---
 
-## 5. The Actionable Lead-Time Window
+## 6. The Actionable Lead-Time Window
 
 Flow-fixability is necessary but not sufficient — the decision also has to happen early
 enough. This section asks: **for each historical exceedance, how far in advance does a
@@ -596,7 +691,7 @@ lead_windows |>
   )
 ```
 
-```{r lead-window-plot, fig.height=5, fig.cap="**Figure 7.** Each historical exceedance day plotted by calendar date and year. Color shows the latest forecast lead at which a flow action is still predicted to achieve compliance. Atmosphere-dominated events (red) cluster in the peak summer period; events manageable with a 7-day lead (blue) are more common earlier in the season."}
+```{r lead-window-plot, fig.height=5, fig.cap="**Figure 9.** Each historical exceedance day plotted by calendar date and year. Color shows the latest forecast lead at which a flow action is still predicted to achieve compliance. Atmosphere-dominated events (red) cluster in the peak summer period; events manageable with a 7-day lead (blue) are more common earlier in the season."}
 window_colors <- c(
   "Fixable: action needed ≥7 days prior"              = "#185FA5",
   "Fixable: action needed ≥3 days prior"              = "#C07038",
@@ -618,6 +713,220 @@ ggplot(lead_windows, aes(x = julian, y = factor(year), color = window_label)) +
   theme_minimal(base_size = 11) +
   theme(panel.grid.minor = element_blank(), legend.position = "right",
         legend.text = element_text(size = 8))
+```
+
+---
+
+## Supplementary: Discharge Requirements for Temperature Target Achievement
+
+For each calendar day across the warm season (June 1 – September 30), this section asks:
+**what is the minimum Camp Polk discharge that would hold RM 8.5 7DADM at or below 20°C,
+given different air temperature conditions?**
+
+Three scenarios are constructed from the historical distribution of daily maximum and minimum
+air temperatures near Camp Polk. Each scenario applies the same exceedance probability to both
+Tmax and Tmin, defining a self-consistent hot, typical, or cool summer day.
+
+```{r supp-scenario-table, echo=FALSE}
+tibble(
+  `Scenario`    = c("Warm", "Median", "Cold"),
+  `Air temp percentile used` = c("75th", "50th", "25th"),
+  `Exceedance probability`   = c("25%", "50%", "75%"),
+  `Interpretation` = c(
+    "Hot conditions — only 25% of historical days are warmer",
+    "Typical summer conditions",
+    "Cool conditions — 75% of historical days are warmer"
+  )
+) |>
+  knitr::kable(
+    caption = "Table S1. Air temperature scenarios for the discharge requirements analysis."
+  )
+```
+
+The solid line in the figure below shows the historical median Camp Polk flow (Q50) — what has
+typically been available on each day. Where a scenario's dashed line rises above Q50, meeting
+the temperature target under those conditions would require flows greater than historically
+typical. The 3-day forecast lead RF model is used for all predictions, with non-flow variables
+(cloud cover, prior-day RM 8.5 7DADM, Camp Polk water temperature) held at their climatological
+medians for each day of year.
+
+```{r supp-setup, include=FALSE}
+julian_range_supp <- 152:272  # Jun 1 – Sep 30
+
+# -- Climatological air temp percentiles by Julian day (±7-day window) --
+air_temp_daily_supp <- all_historical_forecasts |>
+  filter(variable %in% c("temperature_2m_max", "temperature_2m_min")) |>
+  group_by(valid_date, variable) |>
+  summarise(value = mean(value, na.rm = TRUE), .groups = "drop") |>
+  pivot_wider(names_from = variable, values_from = value) |>
+  filter(month(valid_date) %in% 6:9) |>
+  mutate(julian = yday(valid_date))
+
+cloud_daily_supp <- all_historical_forecasts |>
+  filter(variable == "cloud_cover_mean") |>
+  group_by(valid_date) |>
+  summarise(cloud = mean(value, na.rm = TRUE), .groups = "drop") |>
+  filter(month(valid_date) %in% 6:9) |>
+  mutate(julian = yday(valid_date))
+
+cp_temp_supp <- camp_polk_temperature_historical |>
+  filter(statistic == "7DADM") |>
+  mutate(date = as.Date(date)) |>
+  filter(month(date) %in% 6:9) |>
+  mutate(julian = yday(date))
+
+air_clim_supp <- map_dfr(julian_range_supp, function(jd) {
+  d <- filter(air_temp_daily_supp, abs(julian - jd) <= 7)
+  tibble(
+    julian      = jd,
+    air_max_p25 = quantile(d$temperature_2m_max, 0.25, na.rm = TRUE),
+    air_max_p50 = quantile(d$temperature_2m_max, 0.50, na.rm = TRUE),
+    air_max_p75 = quantile(d$temperature_2m_max, 0.75, na.rm = TRUE),
+    air_min_p25 = quantile(d$temperature_2m_min, 0.25, na.rm = TRUE),
+    air_min_p50 = quantile(d$temperature_2m_min, 0.50, na.rm = TRUE),
+    air_min_p75 = quantile(d$temperature_2m_min, 0.75, na.rm = TRUE)
+  )
+})
+
+q50_supp <- map_dfr(julian_range_supp, function(jd) {
+  d <- camp_polk_flow_historical |>
+    filter(statistic == "mean", month(date) %in% 6:9,
+           abs(yday(date) - jd) <= 5, !is.na(flow_cfs))
+  tibble(julian = jd, q50 = quantile(d$flow_cfs, 0.50, na.rm = TRUE))
+})
+
+state_med_supp <- map_dfr(julian_range_supp, function(jd) {
+  cp <- filter(cp_temp_supp,    abs(julian - jd) <= 7)
+  rm <- filter(rm85_dadm_all,   month(date) %in% 6:9, abs(yday(date) - jd) <= 7)
+  cl <- filter(cloud_daily_supp, abs(julian - jd) <= 7)
+  tibble(
+    julian       = jd,
+    cp_7dadm_med = median(cp$temperature, na.rm = TRUE),
+    dadm_m1_med  = median(rm$dadm_7,      na.rm = TRUE),
+    cloud_med    = median(cl$cloud,        na.rm = TRUE)
+  )
+})
+
+rf_supp <- readRDS(file.path(model_dir, "rm85_rf_7dadm_lead3.rds"))
+
+flow_grid_supp <- seq(
+  quantile(camp_polk_flow_historical$flow_cfs, 0.05, na.rm = TRUE),
+  quantile(camp_polk_flow_historical$flow_cfs, 0.95, na.rm = TRUE),
+  length.out = 150
+)
+
+scenarios_supp <- tibble(
+  label       = c("Warm (75th pctile air temp)",
+                  "Median (50th pctile air temp)",
+                  "Cold (25th pctile air temp)"),
+  air_max_col = c("air_max_p75", "air_max_p50", "air_max_p25"),
+  air_min_col = c("air_min_p75", "air_min_p50", "air_min_p25")
+)
+```
+
+```{r supp-threshold-sweep, cache=TRUE, include=FALSE}
+n_days_supp <- length(julian_range_supp)
+n_flow_supp <- length(flow_grid_supp)
+
+base_df_supp <- tibble(julian = julian_range_supp) |>
+  left_join(air_clim_supp,  by = "julian") |>
+  left_join(state_med_supp, by = "julian") |>
+  left_join(q50_supp |> rename(obs_flow = q50), by = "julian")
+
+thresh_results_supp <- map_dfr(seq_len(nrow(scenarios_supp)), function(s_i) {
+  scen <- scenarios_supp[s_i, ]
+
+  # Replicate each day n_flow times; cycle flow grid across all days
+  big_df <- base_df_supp[rep(seq_len(n_days_supp), each = n_flow_supp), ] |>
+    mutate(
+      flow_cfs     = rep(flow_grid_supp, n_days_supp),
+      cp_7dadm_adj = cp_temp_delta(cp_7dadm_med, flow_cfs, obs_flow)
+    ) |>
+    transmute(
+      cp_flow_mean = flow_cfs,
+      cp_7dadm     = cp_7dadm_adj,
+      Julian       = julian,
+      air_max      = .data[[scen$air_max_col]],
+      air_min      = .data[[scen$air_min_col]],
+      cloud_pct    = cloud_med,
+      cp_flow_m1   = flow_cfs,
+      cp_7dadm_m1  = cp_7dadm_adj,
+      air_max_m1   = .data[[scen$air_max_col]],
+      air_min_m1   = .data[[scen$air_min_col]],
+      dadm_m1      = dadm_m1_med
+    )
+
+  preds    <- as.numeric(predict(rf_supp, newdata = big_df))
+  pred_mat <- matrix(preds, nrow = n_days_supp, ncol = n_flow_supp, byrow = TRUE)
+
+  tibble(
+    julian = julian_range_supp,
+    label  = scen$label,
+    threshold_flow = map_dbl(seq_len(n_days_supp), function(i) {
+      idx <- which(pred_mat[i, ] <= target_C)
+      if (length(idx) > 0) flow_grid_supp[idx[1]] else NA_real_
+    })
+  )
+}) |>
+  group_by(label) |>
+  arrange(julian) |>
+  mutate(
+    threshold_smooth = zoo::rollapply(
+      threshold_flow, width = 9,
+      FUN = function(x) if (sum(!is.na(x)) >= 4) mean(x, na.rm = TRUE) else NA_real_,
+      fill = NA, align = "center"
+    )
+  ) |>
+  ungroup()
+```
+
+```{r supp-figure, fig.height=5.5, fig.cap="**Figure S1.** Minimum Camp Polk discharge required to hold RM 8.5 7DADM at or below 20°C on each day of the warm season, under three air temperature scenarios (dashed colored lines). The solid navy line is the historical median Camp Polk flow (Q50). When a dashed line rises above Q50, meeting the temperature target under those air temperature conditions would require flows greater than historically typical. Days where no flow within the observed range achieves the target are omitted. RF model: 3-day forecast lead; all non-flow variables held at climatological medians."}
+date_ref <- as.Date("2024-01-01")
+
+scen_colors_supp <- c(
+  "Warm (75th pctile air temp)"   = "#2ca25f",
+  "Median (50th pctile air temp)" = "#fc8d59",
+  "Cold (25th pctile air temp)"   = "#74add1"
+)
+
+q50_plot_supp <- q50_supp |>
+  mutate(date_plot = date_ref + julian - 1)
+
+thresh_plot_supp <- thresh_results_supp |>
+  mutate(
+    date_plot = date_ref + julian - 1,
+    label = factor(label, levels = c(
+      "Warm (75th pctile air temp)",
+      "Median (50th pctile air temp)",
+      "Cold (25th pctile air temp)"
+    ))
+  )
+
+ggplot() +
+  geom_line(data = q50_plot_supp,
+            aes(x = date_plot, y = q50),
+            color = "navy", linewidth = 1.3) +
+  geom_line(data = thresh_plot_supp,
+            aes(x = date_plot, y = threshold_smooth, color = label),
+            linetype = "dashed", linewidth = 1.0, na.rm = TRUE) +
+  scale_color_manual(values = scen_colors_supp, name = NULL) +
+  scale_x_date(
+    breaks = as.Date(c("2024-06-01", "2024-06-16", "2024-07-01", "2024-07-16",
+                       "2024-07-31", "2024-08-15", "2024-08-30", "2024-09-14",
+                       "2024-09-29")),
+    date_labels = "%m/%d"
+  ) +
+  annotate("text", x = as.Date("2024-06-05"), y = Inf,
+           label = "Navy solid = Q50 historical Camp Polk flow",
+           hjust = 0, vjust = 1.5, color = "navy", size = 3.2) +
+  labs(
+    title    = "Discharge Requirements for Temperature Target Achievement",
+    subtitle = paste0("Minimum Camp Polk flow to hold RM 8.5 7DADM ≤ ", target_C,
+                      "°C  |  3-day lead RF model  |  2012–2025 climatology"),
+    x = NULL, y = "Discharge (cfs)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
 ```
 
 ---
