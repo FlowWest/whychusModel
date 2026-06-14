@@ -161,11 +161,12 @@ The practical takeaway from both figures: **flow management is most effective wh
 ```{r rm85-daily}
 # Full-history daily max and 7DADM at RM 8.5
 # TODO: use whychusModel::rm_8_5_historical
-rm85_dadm_all <- whychusModel::rm_8_5_historical |> 
-  filter(statistic %in% c("max", "7DADM")) |> 
-  pivot_wider(id_cols = date, names_from = "statistic", values_from = "temperature") |> 
+rm85_dadm_all <- whychusModel::rm_8_5_historical |>
+  filter(statistic %in% c("max", "7DADM")) |>
+  pivot_wider(id_cols = date, names_from = "statistic", values_from = "temperature") |>
   rename(tmax = max,
-         dadm_7 = `7DADM`)
+         dadm_7 = `7DADM`) |>
+  mutate(date = as.Date(date))
 
 # 2024 analysis window
 rm85_daily_max <- rm85_dadm_all |>
@@ -367,36 +368,44 @@ flow_grid  <- seq(flow_range[1], flow_range[2], length.out = 300)
 
 sweep_df <- map_dfr(base_feats, function(bf) {
   rf <- readRDS(file.path(model_dir, sprintf("rm85_rf_7dadm_lead%d.rds", bf$k)))
-  map_dfr(flow_grid, function(q) {
-    
-    # Pre-compute adjusted CP temps so they can be used in both feat and the output tibble
-    calc_cp_7dadm    <- cp_temp_delta(bf$cp_7dadm,    q, bf$obs_flow)
-    calc_cp_7dadm_m1 <- cp_temp_delta(bf$cp_7dadm_m1, q, bf$obs_flow)
-    
-    feat <- data.frame(
-      cp_flow_mean = q,      
-      cp_7dadm     = calc_cp_7dadm,
-      Julian       = bf$Julian, 
-      air_max      = bf$air_max,
-      air_min      = bf$air_min, 
-      cloud_pct    = bf$cloud_pct,
-      cp_flow_m1   = q,      
-      cp_7dadm_m1  = calc_cp_7dadm_m1,
-      air_max_m1   = bf$air_max_m1, 
-      air_min_m1   = bf$air_min_m1,
-      dadm_m1      = bf$dadm_m1
-    )
-    
-    tibble(
-      lead_days     = bf$k, 
-      run_date      = bf$run_date,
-      obs_cp_7dadm  = bf$cp_7dadm,      # observed (actual current conditions)
-      calc_cp_7dadm = calc_cp_7dadm,    # adjusted for hypothetical flow q
-      obs_flow      = bf$obs_flow, 
-      flow_cfs      = q,
-      pred_7dadm    = as.numeric(predict(rf, newdata = feat))
-    )
-  })
+
+  # Guard against empty gauge lookups (no record for that exact date → numeric(0))
+  scalar <- function(x) if (length(x) == 0) NA_real_ else x[[1]]
+
+  # Vectorise over entire flow grid at once so predict.all=TRUE returns a
+  # 300-row × 500-tree matrix in a single call (faster than looping)
+  calc_cp_7dadm    <- cp_temp_delta(scalar(bf$cp_7dadm),    flow_grid, scalar(bf$obs_flow))
+  calc_cp_7dadm_m1 <- cp_temp_delta(scalar(bf$cp_7dadm_m1), flow_grid, scalar(bf$obs_flow))
+
+  feat_mat <- data.frame(
+    cp_flow_mean = flow_grid,
+    cp_7dadm     = calc_cp_7dadm,
+    Julian       = scalar(bf$Julian),
+    air_max      = scalar(bf$air_max),
+    air_min      = scalar(bf$air_min),
+    cloud_pct    = scalar(bf$cloud_pct),
+    cp_flow_m1   = flow_grid,
+    cp_7dadm_m1  = calc_cp_7dadm_m1,
+    air_max_m1   = scalar(bf$air_max_m1),
+    air_min_m1   = scalar(bf$air_min_m1),
+    dadm_m1      = scalar(bf$dadm_m1)
+  )
+
+  preds_all <- predict(rf, newdata = feat_mat, predict.all = TRUE)
+  pred_sd   <- apply(preds_all$individual, 1, sd)
+
+  tibble(
+    lead_days     = bf$k,
+    run_date      = bf$run_date,
+    obs_cp_7dadm  = scalar(bf$cp_7dadm),
+    calc_cp_7dadm = calc_cp_7dadm,
+    obs_flow      = scalar(bf$obs_flow),
+    flow_cfs      = flow_grid,
+    pred_7dadm    = preds_all$aggregate,
+    pred_sd       = pred_sd,
+    ci_lower      = preds_all$aggregate - 1.96 * pred_sd,
+    ci_upper      = preds_all$aggregate + 1.96 * pred_sd
+  )
 })
 
 # "for each forecast horizon, what is the minimum flow needed to meet the temperature target, and how far are we from that flow today?"
@@ -404,6 +413,16 @@ threshold_df <- sweep_df |>
   group_by(lead_days) |>
   mutate(crosses = any(pred_7dadm <= target_C)) |> 
   filter(if_else(crosses, pred_7dadm <= target_C, pred_7dadm == min(pred_7dadm))) |>
+  slice_min(flow_cfs, n = 1) |>
+  ungroup() |>
+  mutate(flow_gap = round(flow_cfs - obs_flow))
+
+# Conservative threshold: minimum flow where even the upper CI (pred + 1.96*sd)
+# drops to or below target — i.e., confident the action achieves compliance
+threshold_df_conservative <- sweep_df |>
+  group_by(lead_days) |>
+  mutate(crosses_conservative = any(ci_upper <= target_C)) |>
+  filter(if_else(crosses_conservative, ci_upper <= target_C, ci_upper == min(ci_upper))) |>
   slice_min(flow_cfs, n = 1) |>
   ungroup() |>
   mutate(flow_gap = round(flow_cfs - obs_flow))
@@ -420,9 +439,10 @@ lead_colors <- c("1" = "#D4A853", "3" = "#C07038", "7" = "#185FA5")
 lead_labels <- c("1" = "1-day lead", "3" = "3-day lead", "7" = "7-day lead")
 threshold_crossings <- filter(threshold_df, crosses)
 
-ggplot(sweep_df, aes(x = flow_cfs, y = pred_7dadm,
-                     color = factor(lead_days), group = factor(lead_days))) +
-  geom_line(linewidth = 1.1) +
+ggplot(sweep_df, aes(x = flow_cfs, group = factor(lead_days),
+                     color = factor(lead_days), fill = factor(lead_days))) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.12, color = NA) +
+  geom_line(aes(y = pred_7dadm), linewidth = 1.1) +
   geom_hline(yintercept = target_C, linetype = "dashed",
              color = "#c0392b", linewidth = 0.8) +
   annotate("text", x = flow_range[[1]] + 2, y = target_C + 0.15,
@@ -447,9 +467,10 @@ ggplot(sweep_df, aes(x = flow_cfs, y = pred_7dadm,
                hjust = 0.5, color = "grey40", size = 3.2, fontface = "italic")
   } +
   scale_color_manual(values = lead_colors, labels = lead_labels, name = NULL) +
+  scale_fill_manual( values = lead_colors, labels = lead_labels, name = NULL) +
   scale_x_continuous(labels = scales::comma) +
   labs(title    = sprintf("RF flow sweep — %s exceedance event", format(anchor_date, "%b %d, %Y")),
-       subtitle = "Air temp & cloud fixed at observed values | Camp Polk water temp co-varied with flow",
+       subtitle = "Air temp & cloud fixed at observed values | Camp Polk water temp co-varied with flow | Ribbon = ±1.96 × tree SD",
        x = "Camp Polk sustained flow (cfs)", y = "Predicted 7DADM at RM 8.5 (°C)") +
   theme_minimal(base_size = 12) +
   theme(panel.grid.minor = element_blank(), legend.position = "bottom")
@@ -457,18 +478,25 @@ ggplot(sweep_df, aes(x = flow_cfs, y = pred_7dadm,
 
 ```{r anchor-action-table, echo=FALSE}
 threshold_df |>
+  left_join(
+    threshold_df_conservative |>
+      select(lead_days, flow_conservative = flow_cfs, crosses_conservative),
+    by = "lead_days"
+  ) |>
   transmute(
-    `Days before exceedance` = lead_days,
-    `Action start date`      = format(run_date, "%b %d, %Y"),
-    `Observed flow (cfs)`    = round(obs_flow),
-    `Flow needed (cfs)`      = round(flow_cfs),
-    `Increase required (cfs)` = flow_gap,
-    `Threshold reachable`    = if_else(crosses, "Yes", "No — atm. driver")
+    `Days before exceedance`     = lead_days,
+    `Action start date`          = format(run_date, "%b %d, %Y"),
+    `Observed flow (cfs)`        = round(obs_flow),
+    `Point est. flow needed (cfs)` = round(flow_cfs),
+    `Conservative flow needed (cfs)` = if_else(
+      crosses_conservative, as.character(round(flow_conservative)), "Not achievable"
+    ),
+    `Threshold reachable`        = if_else(crosses, "Yes", "No — atm. driver")
   ) |>
   knitr::kable(
     caption = sprintf(
-      "Table 2. Minimum Camp Polk flow to hold RM 8.5 7DADM at or below %.1f°C, by how far in advance the flow action begins. 'Action start date' is the day the increase would need to begin.",
-      target_C
+      "Table 2. Minimum Camp Polk flow to hold RM 8.5 7DADM at or below %.1f°C by forecast lead. 'Point est.' = where the RF mean prediction crosses %.1f°C. 'Conservative' = where the upper bound of the ±1.96 SD tree interval also crosses %.1f°C (higher confidence the action achieves compliance).",
+      target_C, target_C, target_C
     )
   )
 ```
@@ -944,3 +972,94 @@ Three operational takeaways:
 3. **The window closes fast.** Across historical exceedances, a meaningful fraction are
    fixable at the 7-day lead but not the 1-day lead. A forecast that shows an impending
    exceedance should trigger an immediate decision, not a wait-and-see approach.
+
+---
+
+## RF Model Uncertainty: Flow–Temperature Curve with Tree-Level Confidence Band
+
+The plot below shows the 1-day lead RF model's predicted RM 8.5 7DADM as a function of Camp Polk flow under median July conditions (DOY 197, 50th-percentile air temperature, climatological cloud and upstream temperature). The shaded band is ±1.96 × SD of individual tree predictions — the spread across the 500 trees in the forest, which captures how much the model's individual estimators disagree at each flow level.
+
+```{r rf-uncertainty-sweep, fig.cap="**Figure S2.** Predicted RM 8.5 7DADM (1-day lead RF model) vs. Camp Polk flow under median July conditions. Shaded band = ±1.96 × SD of individual tree predictions. Dashed red line = 20°C HCP threshold."}
+rf_lead1 <- readRDS(file.path(model_dir, "rm85_rf_7dadm_lead1.rds"))
+
+jd_ref <- 197  # mid-July reference day
+
+# July median conditions computed directly from raw data
+jul_air_max <- median(
+  all_historical_forecasts$value[
+    all_historical_forecasts$variable == "temperature_2m_max" &
+    month(all_historical_forecasts$valid_date) == 7],
+  na.rm = TRUE)
+
+jul_air_min <- median(
+  all_historical_forecasts$value[
+    all_historical_forecasts$variable == "temperature_2m_min" &
+    month(all_historical_forecasts$valid_date) == 7],
+  na.rm = TRUE)
+
+jul_cloud <- median(
+  all_historical_forecasts$value[
+    all_historical_forecasts$variable == "cloud_cover_mean" &
+    month(all_historical_forecasts$valid_date) == 7],
+  na.rm = TRUE)
+
+jul_cp_7dadm <- median(
+  camp_polk_temperature_historical$temperature[
+    camp_polk_temperature_historical$statistic == "7DADM" &
+    month(as.Date(camp_polk_temperature_historical$date)) == 7],
+  na.rm = TRUE)
+
+jul_dadm_m1 <- median(
+  rm85_dadm_base$dadm_7[month(rm85_dadm_base$date) == 7],
+  na.rm = TRUE)
+
+obs_flow_ref <- median(
+  camp_polk_flow_historical$flow_cfs[month(camp_polk_flow_historical$date) == 7],
+  na.rm = TRUE)
+
+sweep_flows <- seq(
+  quantile(camp_polk_flow_historical$flow_cfs, 0.05, na.rm = TRUE),
+  quantile(camp_polk_flow_historical$flow_cfs, 0.95, na.rm = TRUE),
+  length.out = 120
+)
+
+cp_7dadm_adj <- cp_temp_delta(jul_cp_7dadm, sweep_flows, obs_flow_ref)
+
+sweep_df <- data.frame(
+  cp_flow_mean = sweep_flows,
+  cp_7dadm     = cp_7dadm_adj,
+  Julian       = jd_ref,
+  air_max      = jul_air_max,
+  air_min      = jul_air_min,
+  cloud_pct    = jul_cloud,
+  cp_flow_m1   = sweep_flows,
+  cp_7dadm_m1  = cp_7dadm_adj,
+  air_max_m1   = jul_air_max,
+  air_min_m1   = jul_air_min,
+  dadm_m1      = jul_dadm_m1
+)
+
+preds_all <- predict(rf_lead1, newdata = sweep_df, predict.all = TRUE)
+
+tibble(
+  flow     = sweep_flows,
+  pred     = preds_all$aggregate,
+  se       = apply(preds_all$individual, 1, sd),
+  ci_lower = pred - 1.96 * se,
+  ci_upper = pred + 1.96 * se
+) |>
+  ggplot(aes(x = flow)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2, fill = "steelblue") +
+  geom_line(aes(y = pred), color = "steelblue", linewidth = 1.0) +
+  geom_hline(yintercept = 20, linetype = "dashed", color = "red", linewidth = 0.7) +
+  annotate("text", x = max(sweep_flows) * 0.98, y = 20.3,
+           label = "20°C HCP threshold", hjust = 1, size = 3.2, color = "red") +
+  labs(
+    title    = "RF Model: Flow–Temperature Curve with Tree-Level Uncertainty",
+    subtitle = paste0("1-day lead  |  DOY ", jd_ref, " (mid-July)  |  Median July air temp & upstream conditions"),
+    x        = "Camp Polk flow (cfs)",
+    y        = "Predicted RM 8.5 7DADM (°C)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+```
