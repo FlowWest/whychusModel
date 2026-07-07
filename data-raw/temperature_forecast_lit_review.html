@@ -11,7 +11,7 @@
 
 <meta name="author" content />
 
-<meta name="date" content="2026-06-05" />
+<meta name="date" content="2026-06-11" />
 
 <title>Literature Review: Machine Learning Instream Temperature Forecasting and Flow-Based Temperature Management</title>
 
@@ -1696,7 +1696,7 @@ border-radius: 0px;
 Instream Temperature Forecasting and Flow-Based Temperature
 Management</h1>
 <h4 class="author"></h4>
-<h4 class="date">2026-06-05</h4>
+<h4 class="date">2026-06-11</h4>
 
 </div>
 
@@ -2867,8 +2867,817 @@ Detroit Dam / N. Santiam River, Oregon
 </ol>
 <hr />
 </div>
-<div id="references" class="section level2">
-<h2>References</h2>
+<div id="udwc-whychus-creek-monitoring-reports-temperature-prediction-approach-by-year" class="section level2">
+<h2>6. UDWC Whychus Creek Monitoring Reports: Temperature Prediction
+Approach by Year</h2>
+<p>The Upper Deschutes Watershed Council (UDWC) has produced annual
+water quality monitoring reports for Whychus Creek since 2009, authored
+primarily by Lauren Mork. Across this series, a consistent analytical
+thread runs through every report: a polynomial regression of 7-day
+average stream temperature against the natural log of instream flow,
+used to identify the minimum flow needed to meet Oregon’s 18°C salmonid
+rearing standard. The approach evolved incrementally — adding air
+temperature as a predictor, refining model selection criteria, and
+expanding to multiple seasons — but the core structure (a flow-based
+empirical temperature model at two focal sites, calibrated to July
+conditions) remained unchanged through 2023.</p>
+<p>All reports use the same monitoring network of up to 13 continuous
+temperature loggers between RM 0.25 (creek mouth, WC 000.25) and RM 38
+(WC 038.00), with OWRD gage 14076050 at Sisters City Park providing flow
+data. The two primary regression sites are WC 024.25 (Sisters City Park,
+immediately below the Three Sisters Irrigation District diversion) and
+WC 006.00 (USFS Road 6360, historically the warmest site on the creek).
+All analyses use R (open-source statistical software).</p>
+<hr />
+<div id="report-jones-2010" class="section level3">
+<h3>6.1 2009 Report — Jones (2010)</h3>
+<p><strong>Data period:</strong> 1995–2008</p>
+<p><strong>Temperature metric:</strong> Seven-day moving average maximum
+temperature (7DMAX), computed per ODEQ’s 2004/2006 Integrated Report
+assessment methodology. Thresholds: 18°C for rearing/migration
+(year-round), 13°C for spawning (January 1–May 15), 24°C lethal.</p>
+<p><strong>Longitudinal analysis:</strong> Average rate of temperature
+change (°C/mile) on the annual hottest water day, compared
+reach-by-reach against the creek-wide average to identify warming and
+cooling zones.</p>
+<p><strong>BACI design:</strong> A Before-After Control-Impact paired
+design compared July daily median temperatures between a reference reach
+(RM 30.25–38, above all diversions) and restoration reaches using
+t-tests or exact permutation tests (Shapiro-Wilk normality tested).</p>
+<p><strong>Flow-temperature regression (introduced here):</strong>
+Paired July 7DMAX with the natural log of average daily flow (LnQD) at
+gage 14076050 for each day from 2000–2008. Data were ranked by flow and
+binned; mean 7DMAX at each flow level was regressed on LnQD using
+polynomial regression. Fit evaluated by R² and residual standard error
+(S); 95% confidence interval: Y ± Z(0.975) × S/√N. This regression was
+used to identify the minimum instream flow needed to achieve mean 7DMAX
+≤ 18°C.</p>
+<p><strong>Result:</strong> ~20 cfs minimum at Sisters City Park; ~60
+cfs minimum at Road 6360 to achieve 18°C.</p>
+<hr />
+</div>
+<div id="report-mork-2012" class="section level3">
+<h3>6.2 2010 Report — Mork (2012)</h3>
+<p><strong>Data period:</strong> 1995–2010</p>
+<p><strong>Temperature metric:</strong> Same 7DMAX methodology. Same
+thresholds.</p>
+<p><strong>BACI design:</strong> Expanded to three restoration reaches
+using data from 2002, 2006, and 2010.</p>
+<p><strong>Flow-temperature regression:</strong> Extended to 2000–2010
+dataset. Same two focal sites, same LnQD polynomial regression method.
+Added comparison to the 2008 Heat Source model (Watershed Sciences and
+MaxDepth Aquatics 2008) scenarios at 33 cfs and 62 cfs — a calibration
+cross-check that continued in all subsequent reports.</p>
+<p><strong>Key change:</strong> BACI analysis revealed that flow
+restoration cooled temperatures downstream of the TSID diversion but
+warmed them downstream of Alder Springs, interpreted as reduced dilution
+of spring inflows by increased mainstem flows — evidence that the
+temperature response to flow restoration depends on reach-specific
+thermal inputs.</p>
+<p><strong>Result:</strong> Minimum 66 cfs at Road 6360 to achieve 18°C
+(up from 60 cfs in the 2009 model, reflecting additional warm years in
+the expanded dataset).</p>
+<hr />
+</div>
+<div id="report-mork-2013" class="section level3">
+<h3>6.3 2011 Report — Mork (2013)</h3>
+<p><strong>Data period:</strong> 1995–2011</p>
+<p><strong>Temperature metric:</strong> Same 7DMAX methodology.</p>
+<p><strong>Station expansion:</strong> Added WC 001.50 as a sixth BACI
+boundary station to isolate temperature response above versus below the
+Alder Springs cold groundwater complex (~95 cfs inflow). Created two
+additional restoration reaches (Reaches 4 and 5) spanning and below
+Alder Springs.</p>
+<p><strong>Flow-temperature regression:</strong> Extended to 2000–2011.
+Model selection formalized using ANOVA in R to test whether adding each
+polynomial term (linear through quartic) statistically improved R²; the
+best-fit polynomial retained per ANOVA result.</p>
+<p><strong>Result:</strong> 66 cfs minimum at Road 6360 (consistent with
+2010 model). Third consecutive year without lethal temperature
+exceedances at Road 6360.</p>
+<hr />
+</div>
+<div id="report-mork-2013-1" class="section level3">
+<h3>6.4 2012 Report — Mork (2013)</h3>
+<p><strong>Data period:</strong> 1995–2012</p>
+<p><strong>Temperature metric:</strong> 7DMAX; spawning threshold
+updated from 13°C to 12.8°C per 2010 303(d) list revision.</p>
+<p><strong>Flow-temperature regression:</strong> Extended to 2000–2012.
+Key methodological refinement: each day’s 7DMAX was paired with the flow
+from the <em>same day</em> rather than a rank-matched day, better
+aligning the temperature window with actual flow conditions.</p>
+<p>For WC 006.00, ANOVA selected a quartic polynomial as both
+statistically best and most conservative (highest temperature
+predictions at flows above 10 cfs). This conservative quartic model was
+retained for Road 6360 in subsequent reports.</p>
+<p><strong>Result:</strong> Quartic model identified 75 cfs minimum at
+Road 6360 — within the 66–78 cfs range predicted by prior models. At the
+existing 33 cfs state water right, the quartic model predicted mean
+7DMAX = 21.1°C ± 1.8°C at Road 6360.</p>
+<hr />
+</div>
+<div id="report-mork-2014" class="section level3">
+<h3>6.5 2013 Report — Mork (2014)</h3>
+<p><strong>Data period:</strong> 1995–2013</p>
+<p><strong>Temperature metric:</strong> Same 7DMAX. Spawning threshold:
+12.8°C.</p>
+<p><strong>Flow-temperature regression:</strong> Extended to 2000–2013.
+Quartic polynomial confirmed as statistically best for both sites by
+ANOVA. Regression equations (Table 3):</p>
+<ul>
+<li>WC 024.25: Mean 7DMAX = 16.79 + 4.05(LnQD) – 0.53(LnQD)² –
+0.41(LnQD)³ + 0.06(LnQD)⁴ (R² = 0.97, S = 0.55)</li>
+<li>WC 006.00: Mean 7DMAX = 22.74 – 0.83(LnQD) + 2.68(LnQD)² –
+1.17(LnQD)³ + 0.12(LnQD)⁴ (R² = 0.97, S = 0.63)</li>
+</ul>
+<p><strong>Result:</strong> 56–65 cfs minimum at Road 6360 (quartic
+model narrowed range compared to prior years). 2013 was the hottest year
+since 2007: 7DMAX exceeded 18°C at Sisters City Park for the first time
+since 2007 at flows of 19–36 cfs, and hovered above 23°C for 6 days at
+Road 6360. The state water right of 33 cfs produced a projected mean
+7DMAX of 20.5–20.6°C at Road 6360.</p>
+<hr />
+</div>
+<div id="report-mork-2015" class="section level3">
+<h3>6.6 2014 Report — Mork (2015)</h3>
+<p><strong>Data period:</strong> 1995–2014</p>
+<p><strong>Temperature metric:</strong> Same 7DMAX. Spawning threshold:
+12.8°C.</p>
+<p><strong>Flow-temperature regression:</strong> Two refinements
+introduced:</p>
+<ol style="list-style-type: decimal">
+<li><em>Dual dataset comparison:</em> Both individual 7DMAX–flow pairs
+and mean 7DMAX at each flow level were regressed and compared.</li>
+<li><em>Model selection expanded:</em> AIC (Akaike Information Criterion
+via <code>extractAIC</code> in R) added alongside ANOVA p-values; cubic
+polynomial selected as best for both sites (down from quartic in prior
+years).</li>
+<li><em>Uncertainty metric upgraded:</em> 95% prediction intervals
+replaced confidence intervals, using the t-distribution formula: ŷ ±
+T(df=n−2, α/2) × SE(ŷ | x₀). Prediction intervals account for
+individual-observation variability rather than uncertainty in the mean —
+a more conservative and operationally relevant metric.</li>
+</ol>
+<p><strong>Result:</strong> Cubic model identified 62 cfs minimum at
+Road 6360 (mean 7DADM = 18.0°C ± 2.6°C); 33 cfs produces 20.5°C ± 2.6°C.
+Fifth consecutive year without lethal temperature exceedances.</p>
+<hr />
+</div>
+<div id="report-mork-2016" class="section level3">
+<h3>6.7 2015 Report — Mork (2016)</h3>
+<p><strong>Data period:</strong> 1995–2015</p>
+<p><strong>Temperature metric:</strong> Metric name standardized to
+<strong>7DADM</strong> (seven-day average of daily maximum temperature)
+to align with Oregon DEQ terminology; calculated using the ODEQ
+Hydrostat Simple spreadsheet. Spawning threshold restored to 13°C. Added
+explicit sub-lethal thresholds: 20°C (chronic sub-lethal for rainbow
+trout), 22°C (severe behavioral consequences), 15°C (elevated egg
+mortality for steelhead and Chinook).</p>
+<p><strong>Flow-temperature regression — major expansion:</strong> This
+report introduced the most significant methodological evolution in the
+series:</p>
+<ul>
+<li><strong>Air temperature added as a predictor</strong> for the first
+time. Daily maximum air temperature (Air) from the Colgate RAWS station
+and its three-day moving average (3DAir) were evaluated alongside
+flow-based predictors.</li>
+<li><strong>12-model candidate set</strong> formally evaluated per site
+per month: linear, quadratic, and cubic forms of QD, LnQD, Air, and
+3DAir. Models selected by AIC (difference ≥ 2 denotes meaningfully
+better fit), with R², residual standard error, and normality plots as
+supporting diagnostics.</li>
+<li><strong>Expanded to three seasons:</strong> July (rearing, 18°C
+standard), April (steelhead spawning, 13°C standard), and September
+(Chinook spawning, 13°C standard).</li>
+</ul>
+<p><strong>Best models (2000–2015):</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>Season / Site</th>
+<th>Best model</th>
+<th>R²</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>July, WC 024.25</td>
+<td>Cubic LnQD</td>
+<td>0.793</td>
+</tr>
+<tr class="even">
+<td>July, WC 006.00</td>
+<td>Cubic LnQD</td>
+<td>0.829</td>
+</tr>
+<tr class="odd">
+<td>April, WC 006.00</td>
+<td>Linear LnQD</td>
+<td>0.528</td>
+</tr>
+<tr class="even">
+<td>September, WC 006.00</td>
+<td>LnQD + 3DAir (multiple regression)</td>
+<td>0.52</td>
+</tr>
+</tbody>
+</table>
+<p>Air temperature alone explained only 20–21% of July temperature
+variation — substantially less than flow. For September, air temperature
+dominated (flow alone explained only 26%), requiring the combined
+predictor model.</p>
+<p><strong>Result:</strong> 63 cfs minimum at Road 6360 for July 18°C
+standard; 22 cfs at Sisters City Park. The 33 cfs state water right
+produced a projected mean 7DADM = 20.7°C ± 3°C at Road 6360. 2015 was
+the hottest, driest year on record for the Deschutes Basin; lethal
+exceedances (&gt;24°C) were recorded for the first time since 2009.</p>
+<hr />
+</div>
+<div id="data-report-mork-standalone-report" class="section level3">
+<h3>6.8 2016 Data Report — Mork (standalone report)</h3>
+<p><strong>Data period:</strong> 2000–2015 for regression; 2016 status
+assessment</p>
+<p><strong>Temperature metric:</strong> Same 7DADM via ODEQ Hydrostat
+Simple spreadsheet.</p>
+<p><strong>Flow-temperature regression:</strong> The 12-model candidate
+set and three-season framework from 2015 was carried forward unchanged.
+The 2000–2015 regression equations and flow targets remained the
+operative models for interpreting 2016 conditions. Flow explained 79–83%
+of July temperature variation; 53% of April; 26% of September alone.
+Heat Source model comparison retained.</p>
+<p><strong>Result:</strong> Same targets as 2015 — 63 cfs minimum at
+Road 6360 for 18°C in July. In 2016: 18°C exceeded at 8 sites (RM 6–26);
+24°C lethal threshold not reached. July temperatures have been
+consistently lower in 2009–2016 compared to the early restoration period
+(2000–2007), consistent with increased flows from TSID restoration.</p>
+<hr />
+</div>
+<div id="report-mork-2018" class="section level3">
+<h3>6.9 2017 Report — Mork (2018)</h3>
+<p><strong>Data period:</strong> 2000–2017</p>
+<p><strong>Temperature metric:</strong> Same 7DADM methodology.</p>
+<p><strong>Flow-temperature regression:</strong> Extended to 2000–2017.
+The formal 12-model candidate set retained, with two multiple regression
+models (LnQD + 3DAir, QD + 3DAir) explicitly added to the model table
+for the September season based on that month’s poor fit from
+single-predictor models. AIC the primary selection criterion; R² and S
+as supporting diagnostics.</p>
+<p>Best models (2000–2017):</p>
+<table>
+<thead>
+<tr class="header">
+<th>Season / Site</th>
+<th>Best model</th>
+<th>R²</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>July, WC 024.25</td>
+<td>Cubic LnQD</td>
+<td>0.78</td>
+</tr>
+<tr class="even">
+<td>July, WC 006.00</td>
+<td>Cubic LnQD</td>
+<td>0.80</td>
+</tr>
+<tr class="odd">
+<td>April, WC 006.00</td>
+<td>Cubic QD</td>
+<td>0.46</td>
+</tr>
+<tr class="even">
+<td>September, WC 006.00</td>
+<td>LnQD + 3DAir</td>
+<td>0.52</td>
+</tr>
+</tbody>
+</table>
+<p>April best model shifted from linear LnQD to cubic QD as the dataset
+expanded — a sensitivity in a season where flow explains less than half
+of variation and air temperature accounts for ~29%.</p>
+<p><strong>Result:</strong> 66 cfs minimum at Road 6360 in July (up
+slightly from 63 cfs in 2016 model). Flows above 53 cfs predicted to
+maintain July temperatures below the 22°C severe consequence threshold.
+2017 was one of the largest snowpacks on record; temperatures were
+substantially better than surrounding years, with 18°C exceeded at only
+5 sites.</p>
+<hr />
+</div>
+<div id="report-mork-2020" class="section level3">
+<h3>6.10 2019 Report — Mork (2020)</h3>
+<p><strong>Data period:</strong> 2000–2019; covers 2018 and 2019
+monitoring seasons</p>
+<p><strong>Temperature metric:</strong> Same 7DADM methodology. Added
+explicit 5-category temperature visualization: meeting 18°C, 18.1–20°C,
+20–22°C, 22–24°C, and &gt;24°C — aligning status assessment with the
+sub-lethal threshold cascade.</p>
+<p><strong>Flow-temperature regression:</strong> Formally expanded to
+<strong>14 candidate models</strong> — the two September multiple
+regression forms (LnQD + 3DAir; QD + 3DAir) integrated into the main
+model table for all seasons. September analysis used 2010–2019 median
+maximum daily air temperature (25.6°C) for flow-target calculations.
+Model selection by AIC + R² + S + residual diagnostics. Software: R.</p>
+<p>Best models (2000–2019):</p>
+<table>
+<thead>
+<tr class="header">
+<th>Season / Site</th>
+<th>Best model</th>
+<th>R²</th>
+<th>S</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>July, WC 024.25</td>
+<td>Cubic LnQD</td>
+<td>0.77</td>
+<td>1.494</td>
+</tr>
+<tr class="even">
+<td>July, WC 006.00</td>
+<td>Cubic LnQD</td>
+<td>0.797</td>
+<td>1.53</td>
+</tr>
+<tr class="odd">
+<td>April, WC 006.00</td>
+<td>Quadratic LnQD</td>
+<td>0.385</td>
+<td>—</td>
+</tr>
+<tr class="even">
+<td>September, WC 006.00</td>
+<td>LnQD + 3DAir</td>
+<td>0.511</td>
+<td>1.635</td>
+</tr>
+</tbody>
+</table>
+<p>Regression coefficients for July (Table 5):</p>
+<ul>
+<li>WC 024.25: Intercept 14.197, β(LnQD) 8.657, β(LnQD²) −3.322,
+β(LnQD³) 0.303</li>
+<li>WC 006.00: Intercept 17.851, β(LnQD) 8.406, β(LnQD²) −3.011,
+β(LnQD³) 0.242</li>
+</ul>
+<p><strong>Result:</strong> 66 cfs minimum at Road 6360 for July 18°C
+standard (consistent with 2017 model). At 33 cfs: projected 20.8°C ±
+3.0°C — maximum predicted value at 33 cfs is 23.8°C. In 2019, lethal
+temperatures (&gt;24°C) were observed for 8 days at Road 6360 — the
+first lethal exceedances documented in the dataset since 2009.</p>
+<hr />
+</div>
+<div id="report-mork-2022" class="section level3">
+<h3>6.11 2020–2021 Report — Mork (2022)</h3>
+<p><strong>Data period:</strong> 2000–2021</p>
+<p><strong>Temperature metric:</strong> Same 7DADM via ODEQ Hydrostat
+Simple spreadsheet. <strong>New threshold added:</strong> 20°C 7DADM —
+the Deschutes Basin Habitat Conservation Plan (DBHCP/HCP) target
+requiring that temperatures at RM 6 not exceed 20°C for more than one
+week per year by year 9 of the HCP (2031). Status now evaluated against
+both the 20°C HCP threshold and the 18°C state standard.</p>
+<p><strong>Flow-temperature regression:</strong> 14-model framework
+retained and updated through 2021. Model selection by AIC, R², S,
+residuals.</p>
+<p>Best models (2000–2021):</p>
+<table>
+<thead>
+<tr class="header">
+<th>Season / Site</th>
+<th>Best model</th>
+<th>R²</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>July, WC 006.00</td>
+<td>Cubic LnQD</td>
+<td>0.79</td>
+</tr>
+<tr class="even">
+<td>April, WC 006.00</td>
+<td>Quadratic LnQD</td>
+<td>0.328</td>
+</tr>
+<tr class="odd">
+<td>September, WC 006.00</td>
+<td>LnQD + 3DAir</td>
+<td>0.511</td>
+</tr>
+</tbody>
+</table>
+<p>Air temperature context by season: July — air explains 19% vs. flow’s
+79%; April — air and flow nearly equal (30% vs. 33%); September — air
+dominates (39% vs. flow’s 16%).</p>
+<p><strong>New flow targets introduced for the HCP
+threshold:</strong></p>
+<table>
+<thead>
+<tr class="header">
+<th>Standard</th>
+<th>Minimum flow required at Road 6360 (July)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>20°C HCP threshold</td>
+<td>41 cfs</td>
+</tr>
+<tr class="even">
+<td>18°C state standard</td>
+<td>67 cfs</td>
+</tr>
+</tbody>
+</table>
+<p>At 33 cfs (DRC target / state water right): projected mean 7DADM =
+20.8°C ± 3.0°C — exceeding the 20°C HCP threshold. In 2020, 7DADM
+exceeded 20°C HCP at 6 sites and 24°C lethal threshold at 2 sites.
+Logger failure in mid-summer 2021 required gap-filling from adjacent
+stations.</p>
+<hr />
+</div>
+<div id="report-mork-2024" class="section level3">
+<h3>6.12 2022–2023 Report — Mork (2024)</h3>
+<p><strong>Data period:</strong> 2000–2023 (regression retained from
+2000–2021; not updated)</p>
+<p><strong>Temperature metric:</strong> Same 7DADM methodology. HCP
+threshold of 20°C now in active regulatory use — 2022 is Year 1 and 2023
+is Year 2 of formal HCP monitoring.</p>
+<p><strong>Flow-temperature regression:</strong> Critically, the
+regression models were <strong>not updated</strong> with 2022–2023 data.
+Justification stated explicitly: “Because protected flows remain well
+below the amount needed to meet the HCP threshold and state temperature
+standard and as a result further refinement of this relationship is not
+useful at this time.” All 2000–2021 targets and equations carried
+forward unchanged.</p>
+<p><strong>New methodological element — diurnal analysis:</strong> For
+the first time, hourly stream temperature data and 15-minute flow data
+were analyzed during extreme temperature events (July 11–21 and August
+12–16, 2023, when 7DADM exceeded 24°C). Daily maximum stream
+temperatures (occurring at approximately 4:00 PM) were shown to coincide
+with daily minimum flows at the Below TSID gage (27.6–31.8 cfs
+instantaneous minimum), adding an intra-day flow-temperature dimension
+not present in prior reports.</p>
+<p>Added a second flow gage: OWRD gage 14075000 (above all diversions)
+used alongside the Sisters gage to characterize natural pre-diversion
+flow — contextualizing how much water is being diverted rather than
+modifying the regression.</p>
+<p><strong>Key findings:</strong> 2023 was the worst temperature year
+documented in the series — 7DADM exceeded 20°C HCP threshold for 65
+consecutive days (June 27–August 30, the longest exceedance period ever
+recorded), exceeded 18°C for 51% of rearing-season days (70 days), and
+exceeded 24°C for 11% of days (15 days). 2022 July flows were higher
+than all but four prior years, yet temperatures still exceeded both the
+18°C and 20°C thresholds — reinforcing the regression finding that 33
+cfs is structurally insufficient.</p>
+<hr />
+</div>
+<div id="cross-report-synthesis-methodological-evolution" class="section level3">
+<h3>6.13 Cross-Report Synthesis: Methodological Evolution</h3>
+<table class="table table-striped table-hover table-condensed table-responsive" style="font-size: 12px; color: black; margin-left: auto; margin-right: auto;">
+<caption style="font-size: initial !important;">
+Evolution of UDWC temperature prediction methodology across all
+monitoring reports. ‘Min. flow target’ is the estimated minimum flow at
+Road 6360 (WC 006.00) required to achieve a mean July 7DMAX or 7DADM ≤
+18°C.
+</caption>
+<thead>
+<tr>
+<th style="text-align:left;">
+Report year
+</th>
+<th style="text-align:left;">
+Temp metric
+</th>
+<th style="text-align:left;">
+Predictor set
+</th>
+<th style="text-align:left;">
+Best July model
+</th>
+<th style="text-align:left;">
+Selection criterion
+</th>
+<th style="text-align:left;">
+Uncertainty
+</th>
+<th style="text-align:center;">
+Min. flow target (Road 6360, 18°C)
+</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2009
+</td>
+<td style="text-align:left;width: 9%; ">
+7DMAX
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD (flow only)
+</td>
+<td style="text-align:left;width: 16%; ">
+Polynomial (unspecified degree)
+</td>
+<td style="text-align:left;width: 14%; ">
+R², S
+</td>
+<td style="text-align:left;width: 10%; ">
+95% CI
+</td>
+<td style="text-align:center;width: 10%; ">
+60
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2010
+</td>
+<td style="text-align:left;width: 9%; ">
+7DMAX
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD (flow only)
+</td>
+<td style="text-align:left;width: 16%; ">
+Polynomial
+</td>
+<td style="text-align:left;width: 14%; ">
+R², S
+</td>
+<td style="text-align:left;width: 10%; ">
+95% CI
+</td>
+<td style="text-align:center;width: 10%; ">
+66
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2011
+</td>
+<td style="text-align:left;width: 9%; ">
+7DMAX
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD (flow only)
+</td>
+<td style="text-align:left;width: 16%; ">
+ANOVA-selected polynomial
+</td>
+<td style="text-align:left;width: 14%; ">
+ANOVA
+</td>
+<td style="text-align:left;width: 10%; ">
+95% CI
+</td>
+<td style="text-align:center;width: 10%; ">
+66
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2012
+</td>
+<td style="text-align:left;width: 9%; ">
+7DMAX
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD (flow only)
+</td>
+<td style="text-align:left;width: 16%; ">
+Quartic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+ANOVA (R², p-value)
+</td>
+<td style="text-align:left;width: 10%; ">
+95% CI
+</td>
+<td style="text-align:center;width: 10%; ">
+75
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2013
+</td>
+<td style="text-align:left;width: 9%; ">
+7DMAX
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD (flow only)
+</td>
+<td style="text-align:left;width: 16%; ">
+Quartic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+ANOVA (R², p-value)
+</td>
+<td style="text-align:left;width: 10%; ">
+95% CI
+</td>
+<td style="text-align:center;width: 10%; ">
+56–65
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2014
+</td>
+<td style="text-align:left;width: 9%; ">
+7DMAX
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD (flow only)
+</td>
+<td style="text-align:left;width: 16%; ">
+Cubic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+ANOVA + AIC
+</td>
+<td style="text-align:left;width: 10%; ">
+95% PI
+</td>
+<td style="text-align:center;width: 10%; ">
+62
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2015
+</td>
+<td style="text-align:left;width: 9%; ">
+7DADM
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD, Air, 3DAir (12-model comparison)
+</td>
+<td style="text-align:left;width: 16%; ">
+Cubic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+AIC primary
+</td>
+<td style="text-align:left;width: 10%; ">
+95% PI
+</td>
+<td style="text-align:center;width: 10%; ">
+63
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2016
+</td>
+<td style="text-align:left;width: 9%; ">
+7DADM
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD, Air, 3DAir (12-model comparison)
+</td>
+<td style="text-align:left;width: 16%; ">
+Cubic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+AIC primary
+</td>
+<td style="text-align:left;width: 10%; ">
+95% PI
+</td>
+<td style="text-align:center;width: 10%; ">
+63
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2017
+</td>
+<td style="text-align:left;width: 9%; ">
+7DADM
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD, Air, 3DAir + Sept. multivariate (14 models)
+</td>
+<td style="text-align:left;width: 16%; ">
+Cubic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+AIC primary
+</td>
+<td style="text-align:left;width: 10%; ">
+95% PI
+</td>
+<td style="text-align:center;width: 10%; ">
+66
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2019
+</td>
+<td style="text-align:left;width: 9%; ">
+7DADM
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD, Air, 3DAir (14 models formal)
+</td>
+<td style="text-align:left;width: 16%; ">
+Cubic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+AIC primary
+</td>
+<td style="text-align:left;width: 10%; ">
+95% PI
+</td>
+<td style="text-align:center;width: 10%; ">
+66
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2020–2021
+</td>
+<td style="text-align:left;width: 9%; ">
+7DADM
+</td>
+<td style="text-align:left;width: 22%; ">
+LnQD, Air, 3DAir (14 models)
+</td>
+<td style="text-align:left;width: 16%; ">
+Cubic LnQD
+</td>
+<td style="text-align:left;width: 14%; ">
+AIC primary
+</td>
+<td style="text-align:left;width: 10%; ">
+95% PI
+</td>
+<td style="text-align:center;width: 10%; ">
+67
+</td>
+</tr>
+<tr>
+<td style="text-align:left;width: 9%; font-weight: bold;">
+2022–2023
+</td>
+<td style="text-align:left;width: 9%; ">
+7DADM
+</td>
+<td style="text-align:left;width: 22%; ">
+Retained from 2020-2021
+</td>
+<td style="text-align:left;width: 16%; ">
+Cubic LnQD (retained)
+</td>
+<td style="text-align:left;width: 14%; ">
+Not updated
+</td>
+<td style="text-align:left;width: 10%; ">
+95% PI (retained)
+</td>
+<td style="text-align:center;width: 10%; ">
+67 (retained)
+</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key analytical patterns across the series:</strong></p>
+<ul>
+<li><strong>Flow is the dominant predictor of July temperature</strong>
+(R² = 0.77–0.97 across years at Road 6360), with the natural log
+transformation consistently outperforming untransformed flow —
+consistent with the nonlinear thermal response to discharge.</li>
+<li><strong>Air temperature adds little to July models</strong> (R²
+0.19–0.21 alone vs. 0.77–0.83 for flow), but becomes increasingly
+important in cooler months: roughly equal to flow in April and dominant
+in September.</li>
+<li><strong>The flow target for the 18°C standard at Road 6360 has been
+stable at 60–75 cfs</strong> across the full record (2009–2021), with
+post-2014 models converging on 62–67 cfs — approximately double the
+existing 33 cfs state instream water right.</li>
+<li><strong>The BACI paired design</strong> (used 2009–2012) was the
+primary tool for attributing temperature changes to flow restoration;
+once restoration was established and flow-temperature relationships were
+well-characterized, the BACI framing gave way to the regression-only
+approach in later reports.</li>
+<li><strong>The 2015 report represents the largest methodological
+step</strong> in the series: it introduced air temperature as a formal
+predictor, expanded to three seasons, and standardized the AIC-based
+12-model selection framework that all subsequent reports inherited.</li>
+<li><strong>Uncertainty quantification shifted from 95% CI to 95% PI in
+2014</strong>, a meaningful change: prediction intervals cover the range
+of individual observations rather than the mean, providing managers with
+a more conservative (and operationally appropriate) bound on whether a
+given flow will meet the temperature standard on any given day.</li>
+</ul>
+<hr />
 <p><strong>Peer-reviewed literature</strong></p>
 <p>Ahmad, S.K., and Hossain, F. (2020). Realizing ecosystem-safe
 hydropower from dams through forecast-informed multi-objective
@@ -2978,6 +3787,7 @@ Report DS 2022-68. <a href="https://www.fws.gov/sites/default/files/documents/20
 <p>U.S. Geological Survey (USGS). (n.d.). <em>Environmental flow studies
 for Middle Fork Willamette, McKenzie, and Santiam River basins</em>.
 Oregon Water Science Center. <a href="https://www.usgs.gov/centers/oregon-water-science-center/science/environmental-flow-studies-middle-fork-willamette" class="uri">https://www.usgs.gov/centers/oregon-water-science-center/science/environmental-flow-studies-middle-fork-willamette</a></p>
+</div>
 </div>
 
 

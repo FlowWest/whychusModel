@@ -1,0 +1,960 @@
+---
+title: "DBHCP Baseline vs. Random Forest Temperature Model — Whychus Creek RM 8.5"
+date: "`r Sys.Date()`"
+author: "Maddee Wiggins"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(here)
+library(randomForest)
+library(whychusModel)
+```
+
+# Overview
+
+This document compares two approaches to characterizing summer water temperature at Whychus Creek:
+
+1. **DBHCP Baseline (2020)** — the Deschutes Basin Habitat Conservation Plan (Chapter 4) documented historical temperature conditions using observed monitoring data, establishing the 20°C exceedance pattern as the basis for conservation measures targeting salmon and steelhead.
+
+2. **Random Forest (RF) Forecast Model** — a machine learning model trained to predict daily maximum temperature and the 7-day average daily maximum (7DADM) at RM 8.5 with 1-, 3-, and 7-day lead times using upstream flow, upstream temperature, and GFS weather forecast inputs.
+
+---
+
+# 1. DBHCP Temperature Characterization
+
+## 1.1 Purpose and Approach
+
+The DBHCP Chapter 4 (Current Conditions of Covered Lands) assessed instream temperatures across Whychus Creek as part of the ESA Section 10 compliance record. The analysis was **retrospective and descriptive** — it used observed continuous temperature data to document baseline conditions relative to regulatory water quality criteria. No predictive modeling was employed.
+
+**Regulatory criteria (ODEQ 2017, Table 4-7):**
+
+- Salmon and trout rearing and migration: **7DADM ≤ 18°C** (year-round, RM 0.0–40.3)
+- Whychus Creek is listed as water quality limited (303(d)) and TMDL-needed for temperature across this entire reach.
+
+## 1.2 Data Sources and Monitoring Period
+
+| Item | Detail |
+|---|---|
+| Source | Upper Deschutes Watershed Council (UDWC) continuous temperature loggers; OWRD gauge 14076050 (Whychus Creek at Sisters) for flow |
+| Baseline period | **2001–2018** (pre-HCP reference period; flow data from OWRD; temperature data available at RM 8.5 from 2011) |
+| Stations used | RM ~24 (upstream of TSID diversion), RM ~20 (Forest Road 4606, downstream of TSID), RM ~6 (Forest Road 6360), RM 0.25 (near mouth) |
+| Metric | 7DADM (°C); mean daily flow (cfs) |
+| Temporal resolution | Daily |
+
+## 1.3 Key Findings (Section 4.5.3)
+
+The DBHCP described a consistent downstream warming gradient in Whychus Creek during the irrigation season:
+
+- **Upstream of TSID diversion (RM 24):** 7DADM generally remains below **16°C** throughout the year.
+- **Between TSID diversion and Sisters (RM ~20):** 7DADM exceeds **16°C** in June–August of some years; peaked as high as 19°C.
+- **Lower Whychus Creek (~RM 6, near our RM 8.5 site):** 7DADM **regularly exceeds 20°C** in mid-summer (July–August), surpassing both the 18°C regulatory criterion and the 20°C steelhead rearing threshold.
+- **Near mouth (RM 0.25):** discharge from Alder Springs (RM 1.4) provides a cooling effect, keeping 7DADM below 16°C.
+
+The 20°C exceedance pattern at approximately RM 6 (Figure 4-29 of DBHCP) is the direct basis for the Whychus Creek conservation measures (WC-1 through WC-7) designed to reduce water temperatures through flow augmentation and habitat restoration.
+
+---
+
+# 2. Random Forest Model
+
+## 2.1 Purpose and Approach
+
+The RF model is a **predictive operational tool** — it forecasts instream temperature at RM 8.5 up to 7 days in advance to support real-time flow management decisions by Three Sisters Irrigation District (TSID). Unlike the HCP baseline, it does not describe historical patterns; it predicts future conditions using current and forecast inputs.
+
+## 2.2 Model Configuration
+
+```{r rf-config-table, echo=FALSE}
+tribble(
+  ~Parameter, ~Value,
+  "Target variables", "Daily max temperature (°C); 7-day average daily maximum (7DADM, °C)",
+  "Forecast horizons", "1-day, 3-day, 7-day lead times",
+  "Algorithm", "Random Forest (randomForest package; ntree = 500)",
+  "Training/test split", "Random 80% / 20% split",
+  "Season modeled", "May–September",
+  "Training data period", "2011–present",
+  "mtry", "floor(n_features / 3) [default]"
+) |>
+  kable(col.names = c("Parameter", "Value"))
+```
+
+## 2.3 Predictor Features
+
+The best-performing RF configurations use the following predictors:
+
+```{r feature-table, echo=FALSE}
+tribble(
+  ~Feature, ~Source, ~`Lag (t-1)?`,
+  "cp_flow_mean", "Camp Polk stream gauge (upstream flow, cfs)", "Yes (best model)",
+  "cp_tmax / cp_7dadm", "Camp Polk temperature logger (upstream temperature, °C)", "Yes (best model)",
+  "Julian", "Day of year", "No",
+  "air_max", "GFS weather forecast — daily max air temperature (°C)", "No",
+  "air_min", "GFS weather forecast — daily min air temperature (°C)", "No",
+  "cloud_pct", "GFS weather forecast — mean cloud cover (%)", "No",
+  "rm_8_5_tmax / rm_8_5_7dadm", "RM 8.5 observed temperature (°C) — target lag", "Yes (best model)"
+) |>
+  kable()
+```
+
+The best-performing model variants (Sections C and F) include both predictor lags (t-1) and a target lag (observed RM 8.5 temperature from the prior day), which substantially improves short-lead performance.
+
+---
+
+# 3. Key Methodological Differences
+
+```{r comparison-table, echo=FALSE}
+tribble(
+  ~Dimension, ~`DBHCP Baseline`, ~`RF Forecast Model`,
+  "Purpose", "Retrospective baseline: document conditions vs. regulatory thresholds", "Operational forecasting: predict future temperatures to guide flow management",
+  "Temporal direction", "Backward-looking (historical 2001–2018)", "Forward-looking (1–7 day predictions)",
+  "Method", "Descriptive statistics on observed 7DADM time series and flow records", "Supervised ML regression (Random Forest)",
+  "Inputs", "In-situ temperature loggers; OWRD flow gauge (single variables)", "Upstream flow, upstream temperature, weather forecasts, day of year",
+  "Output", "Historical 7DADM patterns, exceedance frequencies, and median July flow", "Predicted daily max temp and 7DADM at RM 8.5",
+  "Threshold used", "18°C (regulatory, year-round); 20°C observed exceedance documented; 27 cfs median July flow", "20°C assessed post-hoc as operational action threshold",
+  "Spatial scope", "Multiple RM stations (RM 0.25 to RM 24); Whychus Cr at Sisters gauge", "Single site: RM 8.5",
+  "Data period", "2001–2018 (flow, OWRD 14076050); 2011–2018 (temperature, UDWC)", "2011–present (full record)",
+  "Uncertainty", "None quantified (observational record only)", "R², RMSE, MAE on 20% held-out test set",
+  "Model updating", "Static (published 2020)", "Can be retrained as new observations accumulate"
+) |>
+  kable(col.names = c("Dimension", "DBHCP Baseline", "RF Forecast Model"))
+```
+
+---
+
+# 4. Historical Temperature at RM 8.5
+
+The HCP baseline used monitoring data from RM ~6 (Forest Road 6360) as the nearest analog to the lower Whychus Creek corridor where 20°C exceedances were documented. Our project monitors RM 8.5, which is approximately 2.5 miles upstream from that station and should show similar or slightly cooler mid-summer temperatures.
+
+## 4.1 Load observed data
+
+```{r load-data}
+rm85 <- rm_8_5_historical |>
+  mutate(date = as.Date(date))
+
+rm85_max <- rm85 |>
+  filter(statistic == "max") |>
+  select(date, tmax = temperature)
+
+rm85_7dadm <- rm85 |>
+  filter(statistic == "7DADM") |>
+  select(date, dadm7 = temperature)
+
+rm85_combined <- rm85_max |>
+  left_join(rm85_7dadm, by = "date") |>
+  mutate(
+    year  = year(date),
+    month = month(date),
+    doy   = yday(date)
+  )
+```
+
+## 4.2 Full-record seasonal pattern
+
+```{r seasonal-plot}
+rm85_combined |>
+  filter(month >= 5, month <= 9) |>
+  group_by(doy) |>
+  summarise(
+    median_tmax  = median(tmax,  na.rm = TRUE),
+    p10_tmax     = quantile(tmax,  0.10, na.rm = TRUE),
+    p90_tmax     = quantile(tmax,  0.90, na.rm = TRUE),
+    median_7dadm = median(dadm7, na.rm = TRUE),
+    p10_7dadm    = quantile(dadm7, 0.10, na.rm = TRUE),
+    p90_7dadm    = quantile(dadm7, 0.90, na.rm = TRUE)
+  ) |>
+  pivot_longer(cols = -doy, names_to = c("stat", "metric"), names_sep = "_",
+               values_to = "temp") |>
+  mutate(metric = if_else(metric == "tmax", "Daily Max", "7DADM")) |>
+  pivot_wider(names_from = stat, values_from = temp) |>
+  ggplot(aes(x = doy)) +
+  geom_ribbon(aes(ymin = p10, ymax = p90, fill = metric), alpha = 0.2) +
+  geom_line(aes(y = median, color = metric), linewidth = 0.9) +
+  geom_hline(yintercept = 18, linetype = "dashed", color = "#666666", linewidth = 0.7) +
+  geom_hline(yintercept = 20, linetype = "dotted", color = "#E24B4A", linewidth = 0.7) +
+  annotate("text", x = 155, y = 18.6, label = "18°C regulatory criterion", size = 3.2,
+           hjust = 0, color = "#666666") +
+  annotate("text", x = 155, y = 20.6, label = "20°C steelhead threshold", size = 3.2,
+           hjust = 0, color = "#E24B4A") +
+  scale_color_manual(values = c("Daily Max" = "#185FA5", "7DADM" = "#E24B4A")) +
+  scale_fill_manual(values  = c("Daily Max" = "#185FA5", "7DADM" = "#E24B4A")) +
+  scale_x_continuous(
+    breaks = yday(as.Date(c("2023-05-01","2023-06-01","2023-07-01","2023-08-01","2023-09-01"))),
+    labels = c("May", "Jun", "Jul", "Aug", "Sep")
+  ) +
+  labs(
+    title    = "Whychus Creek RM 8.5 — Daily Max and 7DADM (full record)",
+    subtitle = "Median ± 10th–90th percentile; shaded band = year-to-year variability",
+    x        = NULL,
+    y        = "Temperature (°C)",
+    color    = NULL,
+    fill     = NULL
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+## 4.3 Annual 7DADM time series by year
+
+```{r annual-timeseries}
+rm85_7dadm |>
+  mutate(year = year(date), month = month(date), doy = yday(date)) |>
+  filter(month >= 5, month <= 9) |>
+  ggplot(aes(x = doy, y = dadm7, color = factor(year), group = year)) +
+  geom_line(alpha = 0.7, linewidth = 0.6) +
+  geom_hline(yintercept = 18, linetype = "dashed", color = "#555555", linewidth = 0.7) +
+  geom_hline(yintercept = 20, linetype = "dotted", color = "#E24B4A", linewidth = 0.7) +
+  annotate("text", x = 133, y = 18.6, label = "18°C", size = 3, hjust = 0, color = "#555555") +
+  annotate("text", x = 133, y = 20.6, label = "20°C", size = 3, hjust = 0, color = "#E24B4A") +
+  scale_x_continuous(
+    breaks = yday(as.Date(c("2023-05-01","2023-06-01","2023-07-01","2023-08-01","2023-09-01"))),
+    labels = c("May", "Jun", "Jul", "Aug", "Sep")
+  ) +
+  labs(
+    title = "Whychus Creek RM 8.5 — 7DADM by year",
+    x     = NULL,
+    y     = "7DADM (°C)",
+    color = "Year"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 4.4 Threshold exceedance summary
+
+```{r exceedance-summary}
+hcp_baseline_years <- 2011:2018  # pre-HCP period (temperature data available at RM 8.5 from 2011; HCP baseline ends 2018)
+
+exceedance_summary <- rm85_7dadm |>
+  mutate(year = year(date), month = month(date)) |>
+  filter(month >= 5, month <= 9, !is.na(dadm7)) |>
+  group_by(year) |>
+  summarise(
+    n_obs        = n(),
+    days_ge_18   = sum(dadm7 >= 18, na.rm = TRUE),
+    days_ge_20   = sum(dadm7 >= 20, na.rm = TRUE),
+    pct_ge_18    = round(days_ge_18 / n_obs * 100, 1),
+    pct_ge_20    = round(days_ge_20 / n_obs * 100, 1),
+    max_7dadm    = round(max(dadm7, na.rm = TRUE), 1),
+    .groups      = "drop"
+  ) |>
+  mutate(period = if_else(year %in% hcp_baseline_years, "Pre-HCP baseline", "Post-baseline"))
+
+exceedance_summary |>
+  select(Year = year, Period = period,
+         `N obs (May–Sep)` = n_obs,
+         `Days ≥ 18°C (7DADM)` = days_ge_18,
+         `% ≥ 18°C` = pct_ge_18,
+         `Days ≥ 20°C (7DADM)` = days_ge_20,
+         `% ≥ 20°C` = pct_ge_20,
+         `Peak 7DADM (°C)` = max_7dadm) |>
+  kable()
+```
+
+```{r exceedance-plot}
+exceedance_summary |>
+  select(year, period, `18°C` = days_ge_18, `20°C` = days_ge_20) |>
+  pivot_longer(cols = c(`18°C`, `20°C`), names_to = "threshold", values_to = "days") |>
+  ggplot(aes(x = factor(year), y = days, fill = threshold)) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c("18°C" = "#185FA5", "20°C" = "#E24B4A")) +
+  geom_vline(
+    xintercept = which(levels(factor(exceedance_summary$year)) == "2018") + 0.5,
+    linetype = "dotted", color = "#888888", linewidth = 0.8
+  ) +
+  annotate("text", x = which(levels(factor(exceedance_summary$year)) == "2018") + 0.7,
+           y = max(c(exceedance_summary$days_ge_18, exceedance_summary$days_ge_20), na.rm = TRUE) * 0.9,
+           label = "Pre-HCP baseline ends", size = 3, hjust = 0, color = "#888888") +
+  labs(
+    title    = "Whychus Creek RM 8.5 — Days exceeding temperature thresholds (May–Sep)",
+    subtitle = "Pre-HCP baseline period (2011–2018) vs. post-baseline years",
+    x        = "Year",
+    y        = "Days exceeding threshold",
+    fill     = "Threshold\n(7DADM)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank())
+```
+
+## 4.5 HCP baseline vs. full-record comparison
+
+```{r baseline-vs-full}
+summary_stats <- rm85_7dadm |>
+  mutate(year = year(date), month = month(date)) |>
+  filter(month >= 5, month <= 9, !is.na(dadm7)) |>
+  mutate(period = if_else(year %in% hcp_baseline_years, "Pre-HCP baseline (2011–2018)", "Full record")) |>
+  group_by(period) |>
+  summarise(
+    `Years`             = paste(min(year), max(year), sep = "–"),
+    `N days`            = n(),
+    `Median 7DADM (°C)` = round(median(dadm7), 1),
+    `Mean 7DADM (°C)`  = round(mean(dadm7),   1),
+    `Peak 7DADM (°C)`  = round(max(dadm7),    1),
+    `Days ≥ 18°C`       = sum(dadm7 >= 18),
+    `% ≥ 18°C`          = round(sum(dadm7 >= 18) / n() * 100, 1),
+    `Days ≥ 20°C`       = sum(dadm7 >= 20),
+    `% ≥ 20°C`          = round(sum(dadm7 >= 20) / n() * 100, 1),
+    .groups             = "drop"
+  )
+
+summary_stats |>
+  mutate(across(-period, as.character)) |>
+  pivot_longer(-period, names_to = "Metric", values_to = "value") |>
+  pivot_wider(names_from = period, values_from = value) |>
+  kable()
+```
+
+## 4.6 Pre-HCP flow baseline — Whychus Creek at Sisters (2001–2018)
+
+The DBHCP used flow conditions at Whychus Creek at Sisters (OWRD gauge 14076050) to characterize pre-HCP hydrology. The key figure cited is a **median July flow of 27 cfs** over the 2001–2018 reference period. The following analysis replicates that figure from the OWRD record.
+
+```{r sisters-flow-baseline}
+was_july_baseline <- whychus_at_sisters_historical |>
+  mutate(month = month(date), year = year(date)) |>
+  filter(month == 7, year >= 2001, year <= 2018) |>
+  summarise(
+    `N days`               = n(),
+    `Median flow (cfs)`    = round(median(value, na.rm = TRUE), 1),
+    `Mean flow (cfs)`      = round(mean(value, na.rm = TRUE), 1),
+    `Min flow (cfs)`       = round(min(value, na.rm = TRUE), 1),
+    `Max flow (cfs)`       = round(max(value, na.rm = TRUE), 1),
+    `Period`               = paste0(min(year), "–", max(year))
+  )
+
+was_july_baseline |>
+  kable(caption = "Whychus Creek at Sisters (OWRD 14076050) — July flow summary, 2001–2018")
+```
+
+The replicated median July flow is **`r was_july_baseline[["Median flow (cfs)"]]` cfs**, confirming the DBHCP reference value.
+
+```{r sisters-flow-annual-july}
+was_annual_july <- whychus_at_sisters_historical |>
+  mutate(month = month(date), year = year(date)) |>
+  filter(month == 7) |>
+  group_by(year) |>
+  summarise(median_flow_cfs = median(value, na.rm = TRUE), .groups = "drop") |>
+  mutate(period = if_else(year <= 2018, "Pre-HCP baseline (2001–2018)", "Post-baseline"))
+
+ggplot(was_annual_july, aes(x = year, y = median_flow_cfs, fill = period)) +
+  geom_col(width = 0.8) +
+  geom_hline(yintercept = 27, linetype = "dashed", color = "#185FA5", linewidth = 0.8) +
+  annotate("text", x = min(was_annual_july$year), y = 29,
+           label = "27 cfs — pre-HCP July median", size = 3.2, hjust = 0, color = "#185FA5") +
+  scale_fill_manual(values = c("Pre-HCP baseline (2001–2018)" = "#74A089",
+                                "Post-baseline" = "#C93312")) +
+  labs(
+    title    = "Whychus Creek at Sisters — Median July flow by year (OWRD 14076050)",
+    subtitle = "Pre-HCP baseline period (2001–2018) shaded green; dashed = 27 cfs baseline median",
+    x        = NULL,
+    y        = "Median July flow (cfs)",
+    fill     = NULL
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), panel.grid.major.x = element_blank(),
+        legend.position = "bottom")
+```
+
+```{r sisters-flow-seasonal}
+whychus_at_sisters_historical |>
+  mutate(month = month(date), year = year(date)) |>
+  filter(month >= 4, month <= 10) |>
+  mutate(period = if_else(year >= 2001 & year <= 2018,
+                          "Pre-HCP baseline (2001–2018)", "Other years")) |>
+  group_by(month, period) |>
+  summarise(median_flow = median(value, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = month, y = median_flow, color = period, group = period)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = 7, linetype = "dotted", color = "#888888") +
+  annotate("text", x = 7.1, y = max(whychus_at_sisters_historical$value, na.rm = TRUE) * 0.85,
+           label = "July", size = 3, hjust = 0, color = "#888888") +
+  scale_x_continuous(breaks = 4:10,
+                     labels = c("Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct")) +
+  scale_color_manual(values = c("Pre-HCP baseline (2001–2018)" = "#74A089",
+                                 "Other years" = "#C93312")) +
+  labs(
+    title    = "Whychus Creek at Sisters — Seasonal median flow (Apr–Oct)",
+    subtitle = "Pre-HCP baseline (2001–2018) vs. all other years",
+    x        = NULL,
+    y        = "Median flow (cfs)",
+    color    = NULL
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+---
+
+# 5. Historical Air Temperature Context (HCP Climate Normals)
+
+The DBHCP Chapter 4 characterizes ambient air temperature near Sisters, OR using the **1981–2010 climate normal period**, reporting a mean daily maximum air temperature for July of **29.17°C**. This normal is relevant context for the RF model because `air_max` (GFS daily maximum air temperature) is one of its predictor features.
+
+Using GridMET daily maximum air temperature (`sisters_air_temp_historical`, Sisters, OR; lat 44.29, lon −121.55), we can verify this figure independently and confirm that the climate forcing data used in the RF model is consistent with the HCP baseline.
+
+## 5.1 July average daily maximum — 1981–2010
+
+```{r hcp-air-temp-normals}
+air_july_normals <- sisters_air_temp_historical |>
+  mutate(year = year(date), month = month(date)) |>
+  filter(month == 7, year >= 1981, year <= 2010) |>
+  summarise(
+    n_days          = n(),
+    gridmet_tmax_C  = round(mean(tmax_C, na.rm = TRUE), 2),
+    hcp_reference_C = 29.17,
+    difference_C    = round(mean(tmax_C, na.rm = TRUE) - 29.17, 2)
+  )
+
+air_july_normals |>
+  kable(col.names = c("N days (July 1981–2010)", "GridMET mean July Tmax (°C)",
+                      "HCP reference (°C)", "Difference (°C)"))
+```
+
+The GridMET-derived mean daily maximum air temperature for July 1981–2010 at Sisters, OR is **`r air_july_normals$gridmet_tmax_C`°C**, compared to the HCP reference of **29.17°C** (difference: `r air_july_normals$difference_C`°C). Agreement here confirms that the GridMET series is consistent with the climate record used in the DBHCP.
+
+## 5.2 Monthly air temperature normals (1981–2010)
+
+```{r monthly-air-normals}
+sisters_air_temp_historical |>
+  mutate(year = year(date), month = month(date)) |>
+  filter(year >= 1981, year <= 2010) |>
+  group_by(month) |>
+  summarise(
+    `Mean daily max (°C)` = round(mean(tmax_C, na.rm = TRUE), 2),
+    `Mean daily min (°C)` = round(mean(tmin_C, na.rm = TRUE), 2),
+    `Mean daily avg (°C)` = round(mean(tavg_C, na.rm = TRUE), 2),
+    .groups               = "drop"
+  ) |>
+  mutate(Month = month.abb[month], .before = 1) |>
+  select(-month) |>
+  kable()
+```
+
+## 5.3 July air temperature trend over the full record
+
+```{r july-air-trend}
+sisters_air_temp_historical |>
+  mutate(year = year(date), month = month(date)) |>
+  filter(month == 7) |>
+  group_by(year) |>
+  summarise(mean_tmax_C = mean(tmax_C, na.rm = TRUE), .groups = "drop") |>
+  ggplot(aes(x = year, y = mean_tmax_C)) +
+  geom_point(alpha = 0.7, color = "#C93312") +
+  geom_smooth(method = "lm", se = TRUE, color = "#185FA5", fill = "#185FA5", alpha = 0.15,
+              linewidth = 0.8) +
+  geom_hline(yintercept = 29.17, linetype = "dashed", color = "#888888", linewidth = 0.7) +
+  annotate("text", x = min(sisters_air_temp_historical$date |> lubridate::year()),
+           y = 29.6, label = "HCP normal (29.17°C, 1981–2010)", size = 3,
+           hjust = 0, color = "#888888") +
+  labs(
+    title    = "Sisters, OR — Mean daily maximum air temperature for July (GridMET)",
+    subtitle = "Annual July mean ± linear trend; dashed line = 1981–2010 HCP climate normal",
+    x        = NULL,
+    y        = "Mean July Tmax (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+---
+
+# 6. Baseline Scenario — RF Prediction Under Pre-HCP Conditions
+
+Using the two confirmed pre-HCP reference values — **27 cfs** median July flow (Whychus Creek at Sisters, 2001–2018) and **29.17°C** July mean daily maximum air temperature (HCP climate normal, 1981–2010) — we run the trained RF model to obtain a baseline prediction of 7DADM at RM 8.5. We then translate that prediction downstream to RM 6 using a linear model fit to the overlapping observed record.
+
+## 6.1 Scenario inputs
+
+All predictors are fixed at pre-HCP July medians. Lag inputs (m1) equal their same-day counterparts, placing the model in a **steady-state condition** — consecutive days with identical forcing — which gives the equilibrium prediction for stable baseline conditions.
+
+The RF model uses **Camp Polk flow** (`cp_flow_mean`) as its upstream flow predictor, not the Whychus Creek at Sisters gauge. To translate the HCP reference value of 27 cfs (Whychus at Sisters, OWRD 14076050) into the Camp Polk equivalent, we fit a linear model on the overlapping July record (2011–2018).
+
+```{r cp-flow-lm, echo=TRUE}
+cp_july <- camp_polk_flow_historical |>
+  filter(statistic == "mean") |>
+  mutate(date = as.Date(date), month = month(date), year = year(date)) |>
+  filter(month == 7, year >= 2011, year <= 2018) |>
+  select(date, cp_flow = flow_cfs)
+
+was_july <- whychus_at_sisters_historical |>
+  mutate(date = as.Date(date), month = month(date), year = year(date)) |>
+  filter(month == 7, year >= 2011, year <= 2018) |>
+  select(date, was_flow = value)
+
+flow_joined <- inner_join(cp_july, was_july, by = "date")
+
+lm_cp_was <- lm(cp_flow ~ was_flow, data = flow_joined)
+summary(lm_cp_was)
+
+CP_FLOW_CFS <- round(predict(lm_cp_was, newdata = data.frame(was_flow = 27)), 1)
+cat("Predicted Camp Polk flow when Whychus at Sisters = 27 cfs:", CP_FLOW_CFS, "\n")
+```
+
+The model (R² = `r round(summary(lm_cp_was)$r.squared, 3)`) predicts **`r CP_FLOW_CFS` cfs** at Camp Polk when Whychus at Sisters is 27 cfs. This value is used as the `cp_flow_mean` scenario input below.
+
+```{r scenario-inputs-table, echo=FALSE}
+tribble(
+  ~Predictor, ~Value, ~Source,
+  "cp_flow_mean / cp_flow_m1", paste0(CP_FLOW_CFS, " cfs"), "Derived from LM: Camp Polk ~ Whychus at Sisters (July 2011–2018); WAS = 27 cfs (HCP pre-HCP median, OWRD 14076050)",
+  "cp_7dadm / cp_7dadm_m1",   "16.8°C",    "Camp Polk July 7DADM median, 2011–2018",
+  "air_max / air_max_m1",     "29.17°C",   "HCP climate normal — July mean daily max, 1981–2010",
+  "air_min / air_min_m1",     "6.4°C",     "Sisters July median daily min, 1981–2010 (GridMET)",
+  "cloud_pct",                "12.5%",     "July median cloud cover, historical weather record",
+  "dadm_m1",                  "19.7°C",    "RM 8.5 July 7DADM median, pre-HCP (2011–2018)",
+  "Julian",                   "183–213",   "Swept across all July days (DOY 183–213)"
+) |>
+  kable()
+```
+
+## 6.2 RF model predictions at RM 8.5 across July
+
+```{r load-rf-7dadm-models}
+rf_7dadm_lead1 <- readRDS(here::here("output", "rm85_rf_7dadm_lead1.rds"))
+rf_7dadm_lead3 <- readRDS(here::here("output", "rm85_rf_7dadm_lead3.rds"))
+rf_7dadm_lead7 <- readRDS(here::here("output", "rm85_rf_7dadm_lead7.rds"))
+```
+
+```{r scenario-prediction}
+FLOW_CFS  <- CP_FLOW_CFS  # Camp Polk flow derived from LM when Whychus at Sisters = 27 cfs
+CP_7DADM  <- 16.8
+AIR_MAX   <- 29.17
+AIR_MIN   <- 6.4
+CLOUD_PCT <- 12.5
+DADM_M1   <- 19.7
+
+make_7dadm_features <- function(doy) {
+  data.frame(
+    cp_flow_mean = FLOW_CFS,
+    cp_7dadm     = CP_7DADM,
+    Julian       = doy,
+    air_max      = AIR_MAX,
+    air_min      = AIR_MIN,
+    cloud_pct    = CLOUD_PCT,
+    cp_flow_m1   = FLOW_CFS,
+    cp_7dadm_m1  = CP_7DADM,
+    air_max_m1   = AIR_MAX,
+    air_min_m1   = AIR_MIN,
+    dadm_m1      = DADM_M1
+  )
+}
+
+scenario_rm85 <- map_dfr(183:213, function(doy) {
+  feat <- make_7dadm_features(doy)
+  tibble(
+    doy      = doy,
+    lead_1   = as.numeric(predict(rf_7dadm_lead1, feat)),
+    lead_3   = as.numeric(predict(rf_7dadm_lead3, feat)),
+    lead_7   = as.numeric(predict(rf_7dadm_lead7, feat))
+  )
+})
+
+scenario_rm85 |>
+  pivot_longer(starts_with("lead_"), names_to = "lead", values_to = "pred") |>
+  mutate(lead = recode(lead, lead_1 = "1-day lead", lead_3 = "3-day lead", lead_7 = "7-day lead")) |>
+  group_by(lead) |>
+  summarise(
+    `Median (°C)` = round(median(pred), 2),
+    `Min (°C)`    = round(min(pred), 2),
+    `Max (°C)`    = round(max(pred), 2),
+    .groups       = "drop"
+  ) |>
+  rename(`Forecast lead` = lead) |>
+  kable(caption = "RF-predicted 7DADM at RM 8.5 — pre-HCP baseline scenario (July sweep)")
+```
+
+```{r scenario-plot-rm85}
+scenario_rm85 |>
+  pivot_longer(starts_with("lead_"), names_to = "lead", values_to = "pred") |>
+  mutate(lead = recode(lead, lead_1 = "1-day lead", lead_3 = "3-day lead", lead_7 = "7-day lead")) |>
+  ggplot(aes(x = doy, y = pred, color = lead)) +
+  geom_line(linewidth = 0.9) +
+  geom_hline(yintercept = 18, linetype = "dashed", color = "#666666", linewidth = 0.7) +
+  geom_hline(yintercept = 20, linetype = "dotted", color = "#E24B4A", linewidth = 0.7) +
+  annotate("text", x = 183, y = 18.4, label = "18°C regulatory criterion", size = 3, hjust = 0, color = "#666666") +
+  annotate("text", x = 183, y = 20.4, label = "20°C steelhead threshold",   size = 3, hjust = 0, color = "#E24B4A") +
+  scale_x_continuous(
+    breaks = yday(as.Date(c("2023-07-01","2023-07-08","2023-07-15","2023-07-22","2023-07-29"))),
+    labels = c("Jul 1", "Jul 8", "Jul 15", "Jul 22", "Jul 29")
+  ) +
+  scale_color_manual(values = c("1-day lead" = "#185FA5", "3-day lead" = "#E24B4A", "7-day lead" = "#74A089")) +
+  labs(
+    title    = "RF-predicted 7DADM at RM 8.5 — pre-HCP baseline scenario",
+    subtitle = "27 cfs flow · 29.17°C air max · pre-HCP July medians for all other predictors",
+    x        = "July (day of year)",
+    y        = "Predicted 7DADM (°C)",
+    color    = "Forecast lead"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+## 6.3 RM 8.5 → RM 6 linear model
+
+We fit a simple linear regression between contemporaneous 7DADM observations at RM 8.5 and RM 6 using all overlapping May–September days in the full record.
+
+```{r rm6-rm85-lm}
+lm_data <- rm_6_historical |>
+  filter(statistic == "7DADM") |>
+  select(date, rm6_7dadm = temperature) |>
+  inner_join(
+    rm_8_5_historical |>
+      filter(statistic == "7DADM") |>
+      select(date, rm85_7dadm = temperature),
+    by = "date"
+  ) |>
+  mutate(month = month(date)) |>
+  filter(month >= 5, month <= 9, !is.na(rm6_7dadm), !is.na(rm85_7dadm))
+
+rm6_rm85_lm <- lm(rm6_7dadm ~ rm85_7dadm, data = lm_data)
+lm_summary  <- summary(rm6_rm85_lm)
+lm_coefs    <- coef(rm6_rm85_lm)
+lm_r2       <- lm_summary$r.squared
+
+tribble(
+  ~Term, ~Estimate,
+  "Intercept",         round(lm_coefs[1], 3),
+  "Slope (RM 8.5)",    round(lm_coefs[2], 3),
+  "R²",                round(lm_r2, 3),
+  "N (May–Sep days)",  nrow(lm_data)
+) |>
+  kable(caption = "Linear model: RM 6 7DADM ~ RM 8.5 7DADM (May–Sep, full record)")
+```
+
+```{r rm6-rm85-scatter}
+ggplot(lm_data, aes(x = rm85_7dadm, y = rm6_7dadm)) +
+  geom_point(alpha = 0.2, color = "#888888", size = 1) +
+  geom_smooth(method = "lm", se = TRUE, color = "#185FA5", fill = "#185FA5",
+              alpha = 0.15, linewidth = 0.9) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#aaaaaa", linewidth = 0.5) +
+  annotate("text",
+           x = min(lm_data$rm85_7dadm, na.rm = TRUE) + 0.3,
+           y = max(lm_data$rm6_7dadm,  na.rm = TRUE) - 0.5,
+           label = sprintf("RM 6 = %.2f + %.2f × RM 8.5\nR² = %.3f  n = %d",
+                           lm_coefs[1], lm_coefs[2], lm_r2, nrow(lm_data)),
+           size = 3.2, hjust = 0, color = "#185FA5") +
+  labs(
+    title    = "RM 6 vs. RM 8.5 — 7DADM linear relationship (May–Sep, full record)",
+    subtitle = "Dashed = 1:1 line; blue = OLS fit with 95% CI",
+    x        = "RM 8.5 7DADM (°C)",
+    y        = "RM 6 7DADM (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 6.4 Predicted 7DADM at RM 6 under pre-HCP baseline conditions
+
+```{r scenario-rm6}
+scenario_both <- scenario_rm85 |>
+  pivot_longer(starts_with("lead_"), names_to = "lead", values_to = "pred_rm85") |>
+  mutate(
+    pred_rm6 = as.numeric(predict(rm6_rm85_lm, newdata = data.frame(rm85_7dadm = pred_rm85))),
+    lead = recode(lead, lead_1 = "1-day lead", lead_3 = "3-day lead", lead_7 = "7-day lead")
+  )
+
+scenario_both |>
+  group_by(lead) |>
+  summarise(
+    `RM 8.5 median (°C)` = round(median(pred_rm85), 2),
+    `RM 8.5 range (°C)`  = paste0(round(min(pred_rm85), 2), "–", round(max(pred_rm85), 2)),
+    `RM 6 median (°C)`   = round(median(pred_rm6), 2),
+    `RM 6 range (°C)`    = paste0(round(min(pred_rm6), 2), "–", round(max(pred_rm6), 2)),
+    .groups = "drop"
+  ) |>
+  rename(`Forecast lead` = lead) |>
+  kable(caption = "Predicted 7DADM at RM 8.5 (RF) and RM 6 (linear) — pre-HCP baseline scenario")
+```
+
+```{r scenario-plot-both-sites}
+scenario_both |>
+  pivot_longer(c(pred_rm85, pred_rm6), names_to = "site", values_to = "temp") |>
+  mutate(site = recode(site, pred_rm85 = "RM 8.5 (RF model)", pred_rm6 = "RM 6 (linear model)")) |>
+  ggplot(aes(x = doy, y = temp, color = lead, linetype = site)) +
+  geom_line(linewidth = 0.9) +
+  geom_hline(yintercept = 18, linetype = "dashed", color = "#666666", linewidth = 0.6) +
+  geom_hline(yintercept = 20, linetype = "dotted", color = "#E24B4A", linewidth = 0.6) +
+  annotate("text", x = 183, y = 18.4, label = "18°C", size = 3, hjust = 0, color = "#666666") +
+  annotate("text", x = 183, y = 20.4, label = "20°C", size = 3, hjust = 0, color = "#E24B4A") +
+  scale_x_continuous(
+    breaks = yday(as.Date(c("2023-07-01","2023-07-08","2023-07-15","2023-07-22","2023-07-29"))),
+    labels = c("Jul 1", "Jul 8", "Jul 15", "Jul 22", "Jul 29")
+  ) +
+  scale_color_manual(values = c("1-day lead" = "#185FA5", "3-day lead" = "#E24B4A", "7-day lead" = "#74A089")) +
+  scale_linetype_manual(values = c("RM 8.5 (RF model)" = "solid", "RM 6 (linear model)" = "longdash")) +
+  labs(
+    title    = "Predicted 7DADM at RM 8.5 and RM 6 — pre-HCP baseline scenario",
+    subtitle = "27 cfs flow · 29.17°C air max · pre-HCP July medians for all other predictors",
+    x        = "July (day of year)",
+    y        = "Predicted 7DADM (°C)",
+    color    = "Forecast lead",
+    linetype = "Site"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+---
+
+# 7. UDWC Historical Flow Targets in Context
+
+The UDWC monitoring report series (2009–2023) estimated, via regression, the minimum flow at Road 6360 (RM 6, Whychus Creek) required to achieve a mean July 7DADM ≤ 18°C. These estimates have ranged from 60–75 cfs, converging on 62–67 cfs in recent years. This section places those targets in two reference frames: (1) the historical July flow duration curve at Whychus Creek at Sisters, showing how often those flows were naturally present in the pre-HCP period (2001–2018); and (2) the RF model's temperature–flow relationship, which lets us ask whether those flows, if achieved at Camp Polk (the RF model's upstream input), would be expected to drive RM 8.5 and RM 6 temperatures below the 18°C or 20°C thresholds under typical July air temperature conditions.
+
+## 7.1 Flow targets and Camp Polk equivalents
+
+```{r hcp-flow-targets}
+hcp_targets <- tribble(
+  ~report,       ~target_lo, ~target_hi,
+  "2009",        60,         60,
+  "2010",        66,         66,
+  "2011",        66,         66,
+  "2012",        75,         75,
+  "2013",        56,         65,
+  "2014",        62,         62,
+  "2015",        63,         63,
+  "2016",        63,         63,
+  "2017",        66,         66,
+  "2019",        66,         66,
+  "2020–2021",   67,         67,
+  "2022–2023",   67,         67
+) |>
+  mutate(target_mid = (target_lo + target_hi) / 2)
+```
+
+The RF model uses Camp Polk flow (`cp_flow_mean`), not Whychus at Sisters flow. Each UDWC target is translated to its Camp Polk equivalent using the linear model fit in Section 6.1 (`lm_cp_was`: Camp Polk flow ~ Whychus at Sisters flow, July 2011–2018, R² = 0.991). This conversion is direct: the Mork regressions use **OWRD 14076050 (Whychus Creek at Sisters)** as their flow predictor — Road 6360 is the temperature monitoring site at RM 6, not a flow gauge — so the target values are already expressed in Whychus at Sisters flow terms.
+
+## 7.2 Historical July flow duration curve
+
+The flow duration curve below shows the exceedance probability of mean daily July flow at Whychus Creek at Sisters during the pre-HCP period (2001–2018). Horizontal reference lines mark the midpoint of each UDWC report's flow target; the percentage labels show the fraction of historical July days on which that flow was naturally met or exceeded.
+
+```{r was-fdc, fig.width=11, fig.height=5}
+was_fdc <- whychus_at_sisters_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(month(date) == 7, year(date) >= 2001, year(date) <= 2018) |>
+  arrange(desc(value)) |>
+  mutate(rank = row_number(), n = n(), exceed_prob = rank / (n + 1) * 100)
+
+hcp_targets <- hcp_targets |>
+  rowwise() |>
+  mutate(
+    pct_days_met = round(mean(was_fdc$value >= target_mid, na.rm = TRUE) * 100, 1),
+    cp_equiv     = round(predict(lm_cp_was, newdata = data.frame(was_flow = target_mid)), 1)
+  ) |>
+  ungroup()
+
+fdc_labels <- hcp_targets |>
+  distinct(target_mid, pct_days_met) |>
+  arrange(target_mid) |>
+  mutate(
+    label   = paste0(target_mid, " cfs  (", pct_days_met, "% of days)"),
+    pt_x    = 100 - pct_days_met,
+    # Spread label y-positions evenly across the target range with min 4 cfs gap
+    label_y = {
+      ys <- target_mid
+      min_gap <- 5
+      for (i in seq_along(ys)[-1]) {
+        if (ys[i] - ys[i - 1] < min_gap) ys[i] <- ys[i - 1] + min_gap
+      }
+      ys
+    }
+  )
+
+ggplot(was_fdc, aes(x = exceed_prob, y = value)) +
+  geom_line(color = "#444444", linewidth = 1.1) +
+  geom_hline(
+    data = fdc_labels,
+    aes(yintercept = target_mid),
+    linetype = "dashed", color = "#CCCCCC", linewidth = 0.4
+  ) +
+  geom_point(
+    data = fdc_labels,
+    aes(x = pt_x, y = target_mid),
+    color = "#185FA5", size = 2.5, shape = 21, fill = "white", stroke = 1.2
+  ) +
+  geom_segment(
+    data = fdc_labels,
+    aes(x = pt_x + 1, xend = 101, y = target_mid, yend = label_y),
+    color = "#AAAAAA", linewidth = 0.35
+  ) +
+  geom_text(
+    data = fdc_labels,
+    aes(x = 102, y = label_y, label = label),
+    hjust = 0, size = 3.1, color = "#333333"
+  ) +
+  coord_cartesian(clip = "off", xlim = c(0, 100)) +
+  scale_x_continuous(expand = expansion(mult = c(0.01, 0))) +
+  labs(
+    title    = "July Flow Duration Curve — Whychus Creek at Sisters (2001–2018)",
+    subtitle = "Pre-HCP reference period  |  Dashed lines = UDWC annual flow targets (RM 6, 18°C standard)",
+    x        = "Exceedance probability (%)",
+    y        = "Mean daily flow (cfs)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+        #plot.margin = margin(5, 180, 5, 5))
+```
+
+## 7.3 RF-based compliance assessment
+
+Using the 3-day lead RF model, we predict RM 8.5 7DADM at each UDWC flow target (converted to Camp Polk cfs) under median July air temperature conditions (`r round(31.37, 1)`°C Tmax, `r round(11.97, 1)`°C Tmin) — the 50th percentile of historical July daily temperatures. All non-flow predictors are held at their July climatological medians. The RM 8.5 prediction is then translated to RM 6 via the linear model in Section 6.3.
+
+```{r compliance-sweep}
+AIR_MAX_MED  <- 31.37
+AIR_MIN_MED  <- 11.97
+CLOUD_MED    <- 5.67
+CP_7DADM_MED <- 16.82
+DADM_M1_MED  <- 20.35
+JULIAN_MED   <- 197L
+
+# Flow sweep to find the Camp Polk threshold for 20°C compliance
+flow_grid <- seq(10, 250, by = 1)
+sweep_df  <- data.frame(
+  cp_flow_mean = flow_grid,
+  cp_7dadm     = CP_7DADM_MED,
+  Julian       = JULIAN_MED,
+  air_max      = AIR_MAX_MED,
+  air_min      = AIR_MIN_MED,
+  cloud_pct    = CLOUD_MED,
+  cp_flow_m1   = flow_grid,
+  cp_7dadm_m1  = CP_7DADM_MED,
+  air_max_m1   = AIR_MAX_MED,
+  air_min_m1   = AIR_MIN_MED,
+  dadm_m1      = DADM_M1_MED
+)
+sweep_preds <- as.numeric(predict(rf_7dadm_lead3, newdata = sweep_df))
+idx_20 <- min(which(sweep_preds <= 20.0))
+cp_threshold_20 <- if (is.finite(idx_20)) flow_grid[idx_20] else NA_real_
+
+# Predict for each target's CP equivalent
+hcp_targets <- hcp_targets |>
+  rowwise() |>
+  mutate(
+    pred_rm85 = round(as.numeric(predict(
+      rf_7dadm_lead3,
+      newdata = data.frame(
+        cp_flow_mean = cp_equiv,  cp_7dadm    = CP_7DADM_MED,
+        Julian       = JULIAN_MED, air_max    = AIR_MAX_MED,
+        air_min      = AIR_MIN_MED, cloud_pct = CLOUD_MED,
+        cp_flow_m1   = cp_equiv,  cp_7dadm_m1 = CP_7DADM_MED,
+        air_max_m1   = AIR_MAX_MED, air_min_m1 = AIR_MIN_MED,
+        dadm_m1      = DADM_M1_MED
+      )
+    )), 2),
+    pred_rm6 = round(as.numeric(predict(
+      rm6_rm85_lm, newdata = data.frame(rm85_7dadm = pred_rm85)
+    )), 2)
+  ) |>
+  ungroup()
+```
+
+The table below shows, for each UDWC report target, how often that flow was historically present, what Camp Polk equivalent it implies, and what 7DADM the RF model predicts at RM 8.5 and RM 6 under median July air temperatures.
+
+```{r compliance-table, echo=FALSE}
+hcp_targets |>
+  mutate(
+    Target = if_else(target_lo == target_hi,
+                     as.character(target_lo),
+                     paste0(target_lo, "–", target_hi)),
+    `Meets 20°C?` = if_else(pred_rm6 <= 20, "Yes", "No")
+  ) |>
+  select(
+    `Report`         = report,
+    `Whychus at Sisters (cfs)` = Target,
+    `Camp Polk equiv. (cfs)` = cp_equiv,
+    `% July days met (pre-HCP)` = pct_days_met,
+    `Pred. RM 8.5 7DADM (°C)` = pred_rm85,
+    `Pred. RM 6 7DADM (°C)`   = pred_rm6,
+    `Meets 20°C?`
+  ) |>
+  kable(caption = paste0(
+    "UDWC historical flow targets for Road 6360 (RM 6, 18°C standard) assessed against the RF model ",
+    "under median July air temperatures. Targets are Whychus at Sisters gauge flows (OWRD 14076050); ",
+    "Camp Polk equivalents derived from lm_cp_was. ",
+    "Camp Polk flow needed to hold RM 8.5 ≤ 20°C under these conditions: ",
+    if (!is.na(cp_threshold_20)) paste0(cp_threshold_20, " cfs") else "not achievable within observed range",
+    "."
+  ))
+```
+
+The figure below overlays the UDWC target flows (converted to Camp Polk cfs) on the RF model's predicted RM 8.5 7DADM across the full flow range, under median July conditions. The Camp Polk flow required to achieve RM 8.5 ≤ 20°C is marked by a vertical line.
+
+```{r compliance-curve}
+sweep_rm6 <- as.numeric(predict(rm6_rm85_lm,
+                                newdata = data.frame(rm85_7dadm = sweep_preds)))
+
+target_pts <- hcp_targets |>
+  distinct(report, cp_equiv, pred_rm85, pred_rm6, target_mid)
+
+ggplot() +
+  geom_line(data = data.frame(flow = flow_grid, rm85 = sweep_preds),
+            aes(x = flow, y = rm85, color = "RM 8.5"), linewidth = 1.0) +
+  geom_line(data = data.frame(flow = flow_grid, rm6 = sweep_rm6),
+            aes(x = flow, y = rm6, color = "RM 6"), linewidth = 1.0) +
+  geom_hline(yintercept = 20, linetype = "dotted", color = "#E24B4A", linewidth = 0.7) +
+  geom_hline(yintercept = 18, linetype = "dashed", color = "#666666",  linewidth = 0.7) +
+  { if (!is.na(cp_threshold_20))
+      geom_vline(xintercept = cp_threshold_20, linetype = "solid",
+                 color = "#E24B4A", linewidth = 0.6, alpha = 0.5) } +
+  geom_point(data = target_pts,
+             aes(x = cp_equiv, y = pred_rm85), color = "#185FA5", size = 2.5) +
+  geom_text(data = target_pts,
+            aes(x = cp_equiv, y = pred_rm85 + 0.08, label = report),
+            size = 2.4, hjust = 0.5, color = "#185FA5") +
+  annotate("text", x = if (!is.na(cp_threshold_20)) cp_threshold_20 + 2 else 120,
+           y = 20.8, label = paste0("20°C threshold\n(", cp_threshold_20, " cfs)"),
+           size = 2.8, hjust = 0, color = "#E24B4A") +
+  annotate("text", x = 15, y = 18.15, label = "18°C (state standard)",
+           size = 2.8, hjust = 0, color = "#666666") +
+  scale_color_manual(values = c("RM 8.5" = "#185FA5", "RM 6" = "#E24B4A"), name = NULL) +
+  labs(
+    title    = "RF Model: Camp Polk Flow vs. Predicted 7DADM — Median July Conditions",
+    subtitle = paste0("3-day lead  |  Air max ", AIR_MAX_MED, "°C (July p50)  |  ",
+                      "Blue points = UDWC annual flow targets (as Camp Polk equiv.)"),
+    x        = "Camp Polk flow (cfs)",
+    y        = "Predicted 7DADM (°C)"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+---
+
+# 8. Implications for the RF Model
+
+The DBHCP baseline established that **20°C exceedances in 7DADM are a recurring summer feature** at lower Whychus Creek (RM 6–8.5), providing the ecological and regulatory context for proactive flow management. The RF model extends this baseline in three important ways:
+
+1. **Predictive vs. descriptive**: Instead of documenting how often 20°C was exceeded historically, the RF model forecasts whether exceedance is likely to occur in the coming 1–7 days, enabling pre-emptive action (e.g., increased Alder Springs releases or adjusted TSID diversions).
+
+2. **Mechanistic drivers**: The RF model explicitly links upstream flow (Camp Polk), upstream temperature, and air temperature to RM 8.5 outcomes. This quantifies the levers available to managers — something the HCP baseline observational approach did not attempt.
+
+3. **Ongoing monitoring**: The HCP baseline was a static snapshot (2001–2018). The RF model can be retrained annually as new temperature data accumulates, tracking whether conditions are improving or worsening relative to the 18°C regulatory criterion.
+
+The historical data above shows that RM 8.5 observations from 2011 onward — the period used to train the RF model — are consistent with the DBHCP characterization: the 18°C regulatory criterion is regularly exceeded during peak summer weeks, and the 20°C threshold is breached in warmer years. The pre-HCP flow baseline (median July flow of **27 cfs** at Whychus Creek at Sisters, 2001–2018) provides the hydrologic context for understanding the temperature patterns documented above.
+
+---
+
+# Appendix: Data Sources Summary
+
+```{r data-sources-table, echo=FALSE}
+tribble(
+  ~`Object`,                        ~`Description`,                                       ~`Source`,                          ~`Station / Location`,                          ~`Variables`,                                  ~`Date range`,                   ~`Temporal resolution`,
+  "all_historical_forecasts",       "GFS weather forecasts + ERA5 historical weather",    "Open-Meteo Historical Forecast API","44.39°N, 121.41°W (near Sisters, OR)",         "Air temp max/min (°C), cloud cover (%)",      "2011-01-01 – 2026-04-14",       "Daily; 1-, 3-, 7-day lead + observed (lead 0)",
+  "all_rm_6_dates_and_times",       "Raw sub-daily instream temperature at RM 6",         "UDWC continuous temperature loggers","RM 6 — Forest Road 6360",                     "Water temperature (°C)",                      "2012-04-23 – 2025-10-17",       "Sub-hourly (raw)",
+  "all_rm_8_5_dates_and_times",     "Raw sub-daily instream temperature at RM 8.5",       "UDWC continuous temperature loggers","RM 8.5",                                      "Water temperature (°C)",                      "2011-04-28 – 2025-10-29",       "Sub-hourly (raw)",
+  "camp_polk_flow_historical",      "Camp Polk mean daily streamflow",                    "OWRD station 14076100",             "Camp Polk (upstream of Sisters)",              "Discharge (cfs)",                             "2011-05-01 – 2026-04-20",       "Daily mean",
+  "camp_polk_temperature_historical","Camp Polk instream temperature (OWRD + UDWC logger)","OWRD 14076100 + UDWC logger WC_019-50","Camp Polk — d/s Camp Polk Bridge",          "Water temperature (°C)",                      "2012-05-29 – 2026-04-14",       "Daily (mean, max, min, median, 7DADM)",
+  "rm_6_historical",                "RM 6 daily temperature summary",                     "UDWC continuous temperature loggers","RM 6 — Forest Road 6360",                     "Water temperature (°C)",                      "2012-04-23 – 2025-10-17",       "Daily (mean, max, min, median, 7DADM)",
+  "rm_8_5_historical",              "RM 8.5 daily temperature summary",                   "UDWC continuous temperature loggers","RM 8.5",                                      "Water temperature (°C)",                      "2011-04-28 – 2025-10-29",       "Daily (mean, max, min, median, 7DADM)",
+  "sisters_air_temp_historical",    "Sisters, OR daily air temperature",                  "GridMET gridded climate (climateR)","44.29°N, 121.55°W (Sisters, OR)",              "Tmax, Tmin, Tavg (°C and °F)",                "1979-01-01 – 2025-12-31",       "Daily",
+  "sisters_precip_historical",      "Sisters, OR daily precipitation",                    "GridMET gridded climate (climateR)","44.29°N, 121.55°W (Sisters, OR)",              "Precip, rain, snow (mm)",                     "1979-01-01 – 2025-12-31",       "Daily",
+  "whychus_at_sisters_historical",  "Whychus Creek at Sisters mean daily flow",           "OWRD station 14076050",             "Whychus Creek at Sisters, OR",                 "Discharge (cfs)",                             "2001-01-01 – 2026-06-10",       "Daily mean",
+  "whychus_nr_sisters_historical",  "Whychus Creek near Sisters flow and temperature",    "OWRD station 14075000",             "Whychus Creek near Sisters, OR",               "Discharge (cfs); water temperature (°C)",     "2011-01-01 – 2026-04-15",       "Daily (mean, max, min)"
+) |>
+  kable(align = "lllllll")
+```

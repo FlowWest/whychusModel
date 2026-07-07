@@ -530,14 +530,12 @@ ggplot() +
 
 This site is in Sisters, Oregon. The site only collects flow. 
 
-TODO: change or add instantaneous 
-
-Currently pulled from OWRD 2015-10-01 - 2026-04-14
+Currently pulled from OWRD 2001-01-01 - 2026-04-14
 
 ```{r eval=FALSE}
 was_mean_daily_flow <-  get_owrd_hydro(
   station_nbr = "14076050",
-  start_date = '2011-01-01',
+  start_date = '2001-01-01',
   end_date = Sys.Date(),
   data_source = "MDF"
 ) |> 

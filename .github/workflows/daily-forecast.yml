@@ -1,36 +1,53 @@
 name: Daily Temperature Forecast
-
 on:
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '0 3 * * *'   # 8 PM Pacific during PDT (summer)
+    - cron: '0 4 * * *'   # 8 PM Pacific during PST (winter)
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   forecast:
     runs-on: ubuntu-latest
-
     steps:
+      - name: Check if it's actually 8 PM Pacific
+        id: check_time
+        run: |
+          hour=$(TZ='America/Los_Angeles' date +%H)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger — running regardless of time."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [ "$hour" != "20" ]; then
+            echo "Not 8 PM Pacific (it's $hour:00 there) — skipping this scheduled run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "It's 8 PM Pacific — proceeding."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout repository
+        if: steps.check_time.outputs.skip == 'false'
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up R
+        if: steps.check_time.outputs.skip == 'false'
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: '4.4'
           use-public-rspm: true
 
       - name: Install system libraries
+        if: steps.check_time.outputs.skip == 'false'
         run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
 
       - name: Install pak
+        if: steps.check_time.outputs.skip == 'false'
         run: Rscript -e 'install.packages("pak", repos = "https://cloud.r-project.org")'
 
       - name: Cache R packages
+        if: steps.check_time.outputs.skip == 'false'
         uses: actions/cache@v4
         with:
           path: |
@@ -39,6 +56,7 @@ jobs:
           restore-keys: r-4.4-pkgs-v3-
 
       - name: Install dependencies
+        if: steps.check_time.outputs.skip == 'false'
         run: |
           Rscript -e '
             pak::pak(c(
@@ -48,9 +66,11 @@ jobs:
           '
 
       - name: Install whychusModel package
+        if: steps.check_time.outputs.skip == 'false'
         run: Rscript -e 'pak::local_install(upgrade = FALSE)'
 
       - name: Verify package installs
+        if: steps.check_time.outputs.skip == 'false'
         run: |
           Rscript -e '
             cat("Library paths:\n")
@@ -63,18 +83,17 @@ jobs:
           '
 
       - name: Run daily forecast
+        if: steps.check_time.outputs.skip == 'false'
         run: Rscript analysis/run-daily-forecast.R
 
       - name: Commit and push forecast log
-        if: always()   
+        if: steps.check_time.outputs.skip == 'false' && always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull
           git add output/instream-forecast-log.csv
           git add output/nws-forecasts-log.csv
-          git add output/feat-tmax-log.csv
-          git add output/feat-7dadm-log.csv
-          git add output/nws-forecasts-log.csv
+          git add output/model-inputs-log.csv
           git diff --staged --quiet || git commit -m "chore: forecast log $(date -u +%Y-%m-%d)"
           git push
