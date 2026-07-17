@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check if today's forecast already ran
@@ -40,7 +40,7 @@ jobs:
         run: Rscript -e 'install.packages("pak", repos = "https://cloud.r-project.org")'
       - name: Cache R packages
         if: steps.check_dedupe.outputs.skip == 'false'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ env.R_LIBS_USER }}
@@ -70,6 +70,14 @@ jobs:
               cat(p, ":", system.file(package = p) != "", "\n")
             }
           '
+      - name: Debug OWRD connectivity
+        if: steps.check_dedupe.outputs.skip == 'false'
+        run: |
+          echo "Testing OWRD connectivity from GitHub Actions runner..."
+          curl -v -A "Mozilla/5.0" \
+            "https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/" \
+            -o /dev/null -w "\nHTTP status: %{http_code}\n" || true
+
       - name: Run daily forecast
         if: steps.check_dedupe.outputs.skip == 'false'
         run: Rscript analysis/run-daily-forecast.R
