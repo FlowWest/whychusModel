@@ -9,7 +9,9 @@ get_owrd_hydro(
   start_date,
   end_date,
   data_source = c("MDF", "Instantaneous_Flow", "WTEMP15", "WTEMP_MEAN", "WTEMP_MAX",
-    "WTEMP_MIN")
+    "WTEMP_MIN"),
+  max_retries = 3,
+  timeout_sec = 30
 )
 }
 \arguments{
@@ -32,6 +34,11 @@ One of:
 \item{\code{"WTEMP_MIN"}}{Minimum daily water temperature}
 }
 Defaults to \code{"MDF"}. Partial matching is supported via \code{match.arg()}.}
+
+\item{max_retries}{Integer. Number of times to retry the GET/POST sequence
+on failure before giving up. Defaults to 3.}
+
+\item{timeout_sec}{Numeric. Per-request timeout in seconds. Defaults to 30.}
 }
 \value{
 A tibble with cleaned column names (via \code{janitor::clean_names()})
@@ -50,24 +57,10 @@ performs an initial GET request to retrieve the ASP.NET form state
 (\code{__VIEWSTATE} etc.) before submitting a POST request to download
 data in TSV format. A persistent session handle is used to preserve cookies
 across requests.
-}
-\examples{
-\dontrun{
-# Mean daily flow for a station in 2023
-flow <- get_owrd_hydro(
-  station_nbr = "14076100",
-  start_date  = "2023-01-01",
-  end_date    = "2023-12-31",
-  data_source = "MDF"
-)
 
-# Mean daily water temperature
-temp <- get_owrd_hydro(
-  station_nbr = "14076100",
-  start_date  = "2023-06-01",
-  end_date    = "2023-09-30",
-  data_source = "WTEMP_MEAN"
-)
-}
-
+The form containing \code{__VIEWSTATE} is located explicitly (by ID first,
+then by field content) rather than assumed to be the first form on the
+page, since OWRD may add unrelated forms (banners, widgets) ahead of the
+real one. A browser-like User-Agent is sent on both requests, and the
+GET/POST sequence is retried with backoff on transient failures.
 }
