@@ -1,0 +1,373 @@
+---
+title: "RM 8.5 Random Forest — Lead-Aware Predictor Reliance (7DADM)"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(randomForest)
+library(whychusModel)
+```
+
+# 1. Objective
+
+This analysis builds random forest models to predict RM 8.5's 7-day average
+daily maximum temperature (7DADM) at 1-, 3-, and 7-day lead times.
+
+RM 8.5's own previous-day 7DADM (`dadm_m1`) is a natural candidate predictor:
+water temperature changes gradually, so yesterday's reading is genuinely
+informative about tomorrow's. But that informativeness should decay with
+forecast horizon — by 7 days out, `dadm_m1` reflects conditions a full week
+stale, while the NWS forecast for the target date actually describes what's
+coming. A model that keeps leaning on `dadm_m1` just as heavily at lead 7 as
+at lead 1 is behaving like a persistence forecast dressed up as a multi-day
+prediction, and should be expected to perform worse on genuinely novel
+weather than its lead-1 counterpart would suggest.
+
+The goal, then, is not simply to build three accurate models — it's to
+confirm that reliance on `dadm_m1` actually declines as the forecast horizon
+grows, and to do that with an approach simple enough to trust the result.
+
+# 2. Predictor Design
+
+Four groups of predictors are used, each included for a specific reason:
+
+| Group | Predictors | Rationale |
+|---|---|---|
+| Camp Polk current conditions | `cp_flow_mean`, `cp_7dadm` | Camp Polk is upstream of RM 8.5; its current flow and temperature are physical drivers, not derived from the target |
+| Camp Polk trend | `cp_flow_trend`, `cp_7dadm_trend` | Rate of change over the preceding several days — captures whether upstream conditions are already shifting, independent of RM 8.5's own history |
+| NWS forecast trajectory | `air_max_d1`...`d7`, `air_min_d1`...`d7`, `cloud_d1`...`d7` | The genuine forward-looking signal — every model sees the same seven-day trajectory, not just the single day matching its own horizon, matching what a full NWS pull actually provides regardless of which lead is being forecast. Note: the archive returns the same underlying value for a given calendar date regardless of which lead is requested (confirmed empirically), so this is a denser sampling of one best-estimate series, not genuine per-lead forecast uncertainty |
+| Seasonal timing | `Julian` | Day-of-year context |
+| RM 8.5 persistence | `dadm_m1` | RM 8.5's own previous-day 7DADM — included specifically to test whether the model discounts it appropriately as lead grows |
+
+## 2.1 Every predictor must reflect what's actually known at forecast time
+
+A forecast issued on a given **run date** for a target `lead_k` days later
+can only use information available as of that run date — never information
+from between the run date and the target date. Concretely: `dadm_m1` for a
+lead-7 forecast must be RM 8.5's reading from `run date − 1`, not from
+`target date − 1` (which is 6 days *after* the run date). The same applies
+to Camp Polk's current conditions and trend.
+
+This is enforced by building every "current" and "lagged" predictor via an
+explicit date-shifted join against the target date, rather than a
+row-position-based lag — the latter silently drifts from "run-date-relative"
+to "target-date-relative" as `lead_k` grows, which would let longer-lead
+models see information they wouldn't actually have yet. Getting this wrong
+would inflate longer-lead performance in exactly the way this analysis is
+trying to measure honestly.
+
+## 2.2 Train/test split is chronological, not random
+
+Water temperature is a strongly autocorrelated daily series. A random
+train/test split places days adjacent to each other on opposite sides of the
+split, letting the model implicitly see near-neighbors of its test points
+during training — this inflates apparent accuracy without reflecting real
+forecast skill. The last 20% of dates are held out as test; the model never
+sees them, or anything derived from them, during training.
+
+```{r config}
+month_start     <- 5
+month_end       <- 10
+lead_days_vec   <- c(1:7)
+
+ntree           <- 500
+test_frac       <- 0.20   # chronological holdout
+trend_window    <- 5      # days spanned by the Camp Polk trend features
+threshold_7dadm <- 20.0   # HCP action threshold, same as run-daily-forecast.R
+
+# Shared color scale for lead_days plots below (blue = short lead, red = long lead)
+lead_colors <- setNames(colorRampPalette(c("#185FA5", "#4E9F50", "#C93312"))(length(lead_days_vec)),
+                        as.character(lead_days_vec))
+```
+
+# 3. Data & Feature Construction
+
+```{r load-data}
+rm85_7dadm <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, rm_8_5_7dadm = temperature)
+
+cp_7dadm <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, cp_7dadm = temperature)
+
+cp_flow <- camp_polk_flow_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "mean") |>
+  select(date, cp_flow_mean = flow_cfs)
+```
+
+```{r helpers}
+# NWS air temperature/cloud cover at a given lead. `all_historical_forecasts`
+# is a best-estimate stitched series rather than a true archived multi-lead
+# forecast product, so this is a proxy — falls back to observed weather
+# (lead_days == 0) wherever a lead-specific value is missing.
+get_forecast <- function(lead_k) {
+  fcst <- all_historical_forecasts |>
+    filter(lead_days == lead_k) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date, air_max = temperature_2m_max,
+           air_min = temperature_2m_min, cloud_pct = cloud_cover_mean)
+
+  obs <- all_historical_forecasts |>
+    filter(lead_days == 0) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date, air_max = temperature_2m_max,
+           air_min = temperature_2m_min, cloud_pct = cloud_cover_mean)
+
+  bind_rows(fcst, obs) |> distinct(date, .keep_all = TRUE)
+}
+
+# Full available NWS trajectory (lead 1-7), reshaped from "one row per
+# target date" to "one row per run date" so every model — regardless of its
+# own lead — sees the same seven-day trajectory.
+get_forecast_trajectory <- function() {
+  offsets <- 1:7
+  day_tables <- map(offsets, function(k) {
+    get_forecast(k) |>
+      mutate(run_date = date - k) |>
+      transmute(
+        run_date,
+        !!paste0("air_max_d", k) := air_max,
+        !!paste0("air_min_d", k) := air_min,
+        !!paste0("cloud_d",   k) := cloud_pct
+      )
+  })
+  reduce(day_tables, full_join, by = "run_date") |> arrange(run_date)
+}
+
+# Builds one row per target date. Camp Polk's current values, its trend
+# features, and dadm_m1 are all constructed via explicit run-date-relative
+# joins (target date - lead_k [- 1 or - trend_window, as appropriate]) per
+# Sect. 2.1.
+build_df <- function(lead_k) {
+  fcst_traj <- get_forecast_trajectory() |>
+    mutate(date = run_date + lead_k) |>
+    select(-run_date)
+
+  cp_flow_run  <- cp_flow  |> mutate(date = date + lead_k)
+  cp_7dadm_run <- cp_7dadm |> mutate(date = date + lead_k)
+
+  cp_flow_m1_tbl  <- cp_flow  |> mutate(date = date + lead_k + 1) |> rename(cp_flow_m1 = cp_flow_mean)
+  cp_flow_mw_tbl  <- cp_flow  |> mutate(date = date + lead_k + trend_window) |> rename(cp_flow_mw = cp_flow_mean)
+  cp_7dadm_m1_tbl <- cp_7dadm |> mutate(date = date + lead_k + 1) |> rename(cp_7dadm_m1 = cp_7dadm)
+  cp_7dadm_mw_tbl <- cp_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(cp_7dadm_mw = cp_7dadm)
+
+  dadm_m1_tbl <- rm85_7dadm |>
+    mutate(date = date + lead_k + 1) |>
+    rename(dadm_m1 = rm_8_5_7dadm)
+
+  rm85_7dadm |>
+    left_join(cp_flow_run,      by = "date") |>
+    left_join(cp_7dadm_run,     by = "date") |>
+    left_join(fcst_traj,        by = "date") |>
+    left_join(cp_flow_m1_tbl,   by = "date") |>
+    left_join(cp_flow_mw_tbl,   by = "date") |>
+    left_join(cp_7dadm_m1_tbl,  by = "date") |>
+    left_join(cp_7dadm_mw_tbl,  by = "date") |>
+    left_join(dadm_m1_tbl,      by = "date") |>
+    mutate(
+      cp_flow_trend  = (cp_flow_m1  - cp_flow_mw)  / (trend_window - 1),
+      cp_7dadm_trend = (cp_7dadm_m1 - cp_7dadm_mw) / (trend_window - 1),
+      month  = month(date),
+      Julian = yday(date)
+    ) |>
+    filter(month >= month_start, month <= month_end) |>
+    drop_na() |>
+    distinct(date, .keep_all = TRUE) |>
+    arrange(date)
+}
+
+weather_features <- c(
+  "cp_flow_mean", "cp_7dadm", "cp_flow_trend", "cp_7dadm_trend", "Julian",
+  paste0("air_max_d", 1:7), paste0("air_min_d", 1:7), paste0("cloud_d", 1:7)
+)
+persistence_features <- c(weather_features, "dadm_m1")
+
+split_chronological <- function(df, p = test_frac) {
+  df <- df |> arrange(date)
+  n  <- nrow(df)
+  n_test <- floor(n * p)
+  list(
+    train = df[seq_len(n - n_test), ],
+    test  = df[seq(n - n_test + 1, n), ]
+  )
+}
+
+fit_rf <- function(train_df, features, target = "rm_8_5_7dadm", seed = 42) {
+  set.seed(seed)
+  randomForest(
+    formula = as.formula(paste(target, "~", paste(features, collapse = " + "))),
+    data    = train_df[, c(features, target)],
+    ntree   = ntree,
+    mtry    = max(1, floor(length(features) / 3)),
+    importance = TRUE
+  )
+}
+
+rmse <- function(pred, obs) sqrt(mean((pred - obs)^2))
+```
+
+# 5.One Random Forest per Lead
+
+```{r fit-models}
+lead_results <- map(lead_days_vec, function(k) {
+  df     <- build_df(k)
+  splits <- split_chronological(df)
+  model  <- fit_rf(splits$train, persistence_features)
+  pred   <- predict(model, splits$test)
+  obs    <- splits$test$rm_8_5_7dadm
+
+  list(
+    lead = k, model = model,
+    test_dates = splits$test$date, test_obs = obs, test_pred = pred,
+    RMSE = rmse(pred, obs),
+    MAE  = mean(abs(pred - obs)),
+    R2   = 1 - sum((pred - obs)^2) / sum((obs - mean(obs))^2),
+    n_train = nrow(splits$train), n_test = nrow(splits$test)
+  )
+})
+names(lead_results) <- paste0("lead_", lead_days_vec)
+```
+
+## 5.1 Test performance by lead
+
+```{r results-table}
+results_table <- map_dfr(lead_results, ~ tibble(
+  lead = .x$lead, n_train = .x$n_train, n_test = .x$n_test,
+  RMSE = .x$RMSE, MAE = .x$MAE, R2 = .x$R2
+))
+knitr::kable(results_table, digits = 3,
+             col.names = c("Lead (days)", "n train", "n test", "RMSE (°C)", "MAE (°C)", "R²"))
+```
+
+Performance degrades steadily with lead, as it should for a genuine
+forecast: longer horizons carry more real uncertainty, and this design
+doesn't disguise that with information it shouldn't have.
+
+```{r pred-vs-obs, fig.height=4}
+map_dfr(lead_results, ~ tibble(lead = .x$lead, observed = .x$test_obs, predicted = .x$test_pred)) |>
+  ggplot(aes(x = observed, y = predicted)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#666666") +
+  geom_point(alpha = 0.5, color = "#185FA5", size = 1.5) +
+  facet_wrap(~paste("Lead:", lead, "days")) +
+  labs(title = "Predicted vs Observed (Test Period)",
+       x = "Observed 7DADM (°C)", y = "Predicted 7DADM (°C)") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+## 5.2 Forecast vs. observed over time
+
+```{r timeseries-pred-vs-obs, fig.height=4.5}
+test_long <- map_dfr(lead_results, ~ tibble(
+  lead = .x$lead, date = .x$test_dates, observed = .x$test_obs, predicted = .x$test_pred
+))
+
+# Observed is the same physical series regardless of lead — collapse to one
+# row per date before drawing the line, since different leads' test sets can
+# differ slightly at the edges depending on which rows survived drop_na().
+observed_7dadm <- test_long |> distinct(date, observed) |> arrange(date)
+
+ggplot() +
+  geom_line(data = observed_7dadm, aes(x = date, y = observed), color = "black", linewidth = 0.8) +
+  geom_point(data = test_long, aes(x = date, y = predicted, color = factor(lead)), size = 1.6, alpha = 0.8) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
+  facet_wrap(~year(date), scales = "free_x") + 
+  scale_color_manual(values = lead_colors) +
+  labs(
+    title = "RM 8.5 7DADM observed (black line) vs. forecast (points, by lead day) — Test Period",
+    subtitle = "Dotted red line = HCP action threshold",
+    x = NULL, y = "7DADM (°C)", color = "Lead (days)"
+  ) +
+  theme_minimal()
+```
+
+# 6. Confirming the Hypothesis: Reliance on `dadm_m1` Declines with Lead
+
+```{r importance-by-lead-table}
+importance_by_lead <- map_dfr(lead_results, function(r) {
+  as.data.frame(importance(r$model)) |>
+    rownames_to_column("feature") |>
+    mutate(lead = r$lead) |>
+    arrange(desc(`%IncMSE`)) |>
+    mutate(rank = row_number())
+})
+
+importance_by_lead |>
+  filter(feature == "dadm_m1") |>
+  select(lead, rank, `%IncMSE`) |>
+  knitr::kable(digits = 1, col.names = c("Lead (days)", "dadm_m1 rank", "dadm_m1 %IncMSE"))
+```
+
+```{r importance-by-lead-plot, fig.height=6}
+importance_by_lead |>
+  group_by(lead) |>
+  arrange(`%IncMSE`, .by_group = TRUE) |>
+  mutate(feature_order = row_number()) |>
+  ungroup() |>
+  ggplot(aes(x = feature_order, y = `%IncMSE`, fill = feature == "dadm_m1")) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(y = 1, label = feature), hjust = 0, size = 2.8, color = "white") +
+  coord_flip() +
+  facet_wrap(~paste("Lead:", lead, "days"), scales = "free_y") +
+  scale_fill_manual(values = c(`TRUE` = "#C93312", `FALSE` = "#185FA5")) +
+  labs(title = "Variable Importance by Lead",
+       subtitle = "dadm_m1 highlighted in red",
+       x = NULL, y = "% Increase in MSE") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank(), axis.text.y = element_blank())
+```
+
+```{r importance-rank-trend, fig.height=4}
+importance_by_lead |>
+  filter(feature == "dadm_m1") |>
+  ggplot(aes(x = lead, y = rank)) +
+  geom_line(color = "#C93312", linewidth = 0.9) +
+  geom_point(color = "#C93312", size = 3) +
+  scale_x_continuous(breaks = lead_days_vec) +
+  scale_y_reverse(breaks = 1:5) +
+  labs(title = "dadm_m1's Importance Rank by Lead",
+       subtitle = "Lower rank number = more relied upon",
+       x = "Forecast lead (days)", y = "Rank among all features") +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+`dadm_m1`'s raw importance barely changes across leads, but its rank
+relative to every other predictor drops sharply — from clearly dominant at
+lead 1 to fourth or fifth place at lead 7, overtaken by `Julian` (seasonal
+timing) and `cp_flow_mean` (Camp Polk's current flow). Given a rich enough
+set of alternative predictors, the model reallocates trust away from a
+stale persistence signal on its own, without an externally engineered
+mechanism forcing it to.
+
+# 7. Saved Artifacts
+
+```{r save-models}
+output_dir <- here::here("output")
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+for (r in lead_results) {
+  saveRDS(r$model, file.path(output_dir, paste0("rm85_rf_7dadm_lead_aware_lead", r$lead, ".rds")))
+}
+
+cat("Saved lead-aware 7DADM models to:\n")
+for (k in lead_days_vec) cat(" ", file.path(output_dir, paste0("rm85_rf_7dadm_lead_aware_lead", k, ".rds")), "\n")
+```

@@ -878,7 +878,7 @@ one_month_historical <- get_historical_forecast(
   lon        = -121.406792,
   start_date = "2023-07-01",
   end_date   = "2023-07-31",
-  lead_days  = c(1, 3, 7)
+  lead_days  = c(1:7)
 )
 
 glimpse(one_month_historical)
@@ -889,7 +889,7 @@ historical_forecast_data <- get_historical_forecast_range(
   lon        = -121.406792,
   start_date = "2019-01-01",
   end_date   = Sys.Date()-1,
-  lead_days  = c(1, 3, 7),
+  lead_days  = c(1:7),
   save_dir   = "data-raw/historical_forecasts"
 ) |>
   mutate(type = "historical forecast")
