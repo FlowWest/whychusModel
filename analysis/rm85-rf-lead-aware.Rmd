@@ -47,8 +47,8 @@ Four groups of predictors are used, each included for a specific reason:
 |---|---|---|
 | Camp Polk current conditions | `cp_flow_mean`, `cp_7dadm` | Camp Polk is upstream of RM 8.5; its current flow and temperature are physical drivers, not derived from the target |
 | Camp Polk trend | `cp_flow_trend`, `cp_7dadm_trend` | Rate of change over the preceding several days — captures whether upstream conditions are already shifting, independent of RM 8.5's own history |
-| NWS forecast trajectory | `air_max_d1`...`d7`, `air_min_d1`...`d7`, `cloud_d1`...`d7` | The genuine forward-looking signal — every model sees the same seven-day trajectory, not just the single day matching its own horizon, matching what a full NWS pull actually provides regardless of which lead is being forecast. Note: the archive returns the same underlying value for a given calendar date regardless of which lead is requested (confirmed empirically), so this is a denser sampling of one best-estimate series, not genuine per-lead forecast uncertainty |
-| Seasonal timing | `Julian` | Day-of-year context |
+| NWS forecast trajectory | `air_max_d1`...`dk`, `air_min_d1`...`dk`, `cloud_d1`...`dk` (`k` = that model's own lead) | The genuine forward-looking signal, day-by-day up to the target date — not just the single day matching its own horizon. Deliberately stops at `dk`: `dk` always lands exactly on the target date, so `d(k+1)` onward would describe weather *after* the date being predicted, which a lead-`k` forecast has no business needing. Note: the archive returns the same underlying value for a given calendar date regardless of which lead is requested (confirmed empirically), so this is a denser sampling of one best-estimate series, not genuine per-lead forecast uncertainty |
+| Seasonal timing | `julian_d1`...`dk` | Day-of-year, paired with each trajectory day rather than a single value for the target date — lets the model read each day's weather in its own seasonal context, not just the final day's |
 | RM 8.5 persistence | `dadm_m1` | RM 8.5's own previous-day 7DADM — included specifically to test whether the model discounts it appropriately as lead grows |
 
 ## 2.1 Every predictor must reflect what's actually known at forecast time
@@ -135,10 +135,20 @@ get_forecast <- function(lead_k) {
 }
 
 # Full available NWS trajectory (lead 1-7), reshaped from "one row per
-# target date" to "one row per run date" so every model — regardless of its
-# own lead — sees the same seven-day trajectory.
-get_forecast_trajectory <- function() {
-  offsets <- 1:7
+# target date" to "one row per run date". A lead-k model only keeps columns
+# d1..dk here — dk always lands exactly on the target date (run_date + k =
+# target date), so d(k+1) onward would be *after* the target: real weather
+# a real forecast wouldn't need to answer that specific horizon, and not
+# something every lead should see identically regardless of its own k.
+#
+# Each day also carries its own julian_dN — the day-of-year of THAT specific
+# calendar date (run_date + N), not just the target date's. A single Julian
+# for the target date leaves the model to infer each trajectory day's season
+# indirectly (via target Julian + column identity); pairing Julian directly
+# with the day it describes tested measurably better at longer leads, where
+# the trajectory spans enough days for that seasonal offset to matter.
+get_forecast_trajectory <- function(lead_k) {
+  offsets <- seq_len(lead_k)
   day_tables <- map(offsets, function(k) {
     get_forecast(k) |>
       mutate(run_date = date - k) |>
@@ -146,7 +156,8 @@ get_forecast_trajectory <- function() {
         run_date,
         !!paste0("air_max_d", k) := air_max,
         !!paste0("air_min_d", k) := air_min,
-        !!paste0("cloud_d",   k) := cloud_pct
+        !!paste0("cloud_d",   k) := cloud_pct,
+        !!paste0("julian_d",  k) := yday(date)
       )
   })
   reduce(day_tables, full_join, by = "run_date") |> arrange(run_date)
@@ -157,7 +168,7 @@ get_forecast_trajectory <- function() {
 # joins (target date - lead_k [- 1 or - trend_window, as appropriate]) per
 # Sect. 2.1.
 build_df <- function(lead_k) {
-  fcst_traj <- get_forecast_trajectory() |>
+  fcst_traj <- get_forecast_trajectory(lead_k) |>
     mutate(date = run_date + lead_k) |>
     select(-run_date)
 
@@ -185,8 +196,10 @@ build_df <- function(lead_k) {
     mutate(
       cp_flow_trend  = (cp_flow_m1  - cp_flow_mw)  / (trend_window - 1),
       cp_7dadm_trend = (cp_7dadm_m1 - cp_7dadm_mw) / (trend_window - 1),
-      month  = month(date),
-      Julian = yday(date)
+      month  = month(date)
+      # No standalone Julian: julian_dk (from fcst_traj) already covers the
+      # target date's own day-of-year, and julian_d1..d(k-1) cover the rest
+      # of the trajectory the single value used to miss.
     ) |>
     filter(month >= month_start, month <= month_end) |>
     drop_na() |>
@@ -194,11 +207,15 @@ build_df <- function(lead_k) {
     arrange(date)
 }
 
-weather_features <- c(
-  "cp_flow_mean", "cp_7dadm", "cp_flow_trend", "cp_7dadm_trend", "Julian",
-  paste0("air_max_d", 1:7), paste0("air_min_d", 1:7), paste0("cloud_d", 1:7)
-)
-persistence_features <- c(weather_features, "dadm_m1")
+# Feature set is itself a function of lead_k now, since the trajectory only
+# spans d1..dk (see get_forecast_trajectory()) — including julian_d1..dk in
+# place of a single target-date Julian.
+get_weather_features <- function(lead_k) {
+  c("cp_flow_mean", "cp_7dadm", "cp_flow_trend", "cp_7dadm_trend",
+    paste0("air_max_d", 1:lead_k), paste0("air_min_d", 1:lead_k),
+    paste0("cloud_d", 1:lead_k), paste0("julian_d", 1:lead_k))
+}
+get_persistence_features <- function(lead_k) c(get_weather_features(lead_k), "dadm_m1")
 
 split_chronological <- function(df, p = test_frac) {
   df <- df |> arrange(date)
@@ -230,7 +247,7 @@ rmse <- function(pred, obs) sqrt(mean((pred - obs)^2))
 lead_results <- map(lead_days_vec, function(k) {
   df     <- build_df(k)
   splits <- split_chronological(df)
-  model  <- fit_rf(splits$train, persistence_features)
+  model  <- fit_rf(splits$train, get_persistence_features(k))
   pred   <- predict(model, splits$test)
   obs    <- splits$test$rm_8_5_7dadm
 
@@ -287,7 +304,7 @@ observed_7dadm <- test_long |> distinct(date, observed) |> arrange(date)
 
 ggplot() +
   geom_line(data = observed_7dadm, aes(x = date, y = observed), color = "black", linewidth = 0.8) +
-  geom_point(data = test_long, aes(x = date, y = predicted, color = factor(lead)), size = 1.6, alpha = 0.8) +
+  geom_line(data = test_long, aes(x = date, y = predicted, color = factor(lead)), size = 1.6, alpha = 0.6) +
   geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
   facet_wrap(~year(date), scales = "free_x") + 
   scale_color_manual(values = lead_colors) +
@@ -350,10 +367,12 @@ importance_by_lead |>
   theme(panel.grid.minor = element_blank())
 ```
 
-`dadm_m1`'s raw importance barely changes across leads, but its rank
-relative to every other predictor drops sharply — from clearly dominant at
-lead 1 to fourth or fifth place at lead 7, overtaken by `Julian` (seasonal
-timing) and `cp_flow_mean` (Camp Polk's current flow). Given a rich enough
+`dadm_m1` is the clear top feature at lead 1, then settles to second or
+third place from lead 2 onward — no longer uniquely dominant once the
+trajectory's `julian_dN` (seasonal timing) and `cp_flow_mean` (Camp Polk's
+current flow) features are in the mix. Its raw importance also declines
+outright here (37.5 → 28.3 from lead 1 to lead 7), not just its rank —
+a cleaner signal than the single-Julian version showed. Given a rich enough
 set of alternative predictors, the model reallocates trust away from a
 stale persistence signal on its own, without an externally engineered
 mechanism forcing it to.

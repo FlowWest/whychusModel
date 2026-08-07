@@ -43,13 +43,14 @@ available, using:
    in place of the 2025 stand-in.
 
 The model itself is the **lead-aware design** from `rm85-rf-lead-aware.Rmd`
-(`rm85_rf_7dadm_lead_aware_lead*.rds`): one random forest per lead (1
-through 7) sharing a single feature set — Camp Polk's current conditions and
-trend, the NWS forecast trajectory across day +1 through +7 from the run
-date, seasonal timing, and RM 8.5's own previous-day 7DADM (`dadm_m1`) —
-rather than the single-day snapshot the previously deployed model used.
-That analysis found the model reallocates trust away from `dadm_m1` toward
-seasonal timing and Camp Polk's current flow as lead grows, on its own.
+(`rm85_rf_7dadm_lead_aware_lead*.rds`): a separate random forest per lead (1
+through 7), each with its own feature set — Camp Polk's current conditions
+and trend, the NWS forecast trajectory from day +1 through +*k* (that
+model's own lead, not the full week for every lead), seasonal timing paired
+with each trajectory day (`julian_d1`...`dk`, not one value for the whole
+row), and RM 8.5's own previous-day 7DADM (`dadm_m1`). That analysis found
+the model reallocates trust away from `dadm_m1` toward seasonal timing and
+Camp Polk's current flow as lead grows, on its own.
 
 The resulting predictions are then compared against the real RM 8.5
 observations to measure actual forecast skill: bias, MAE, RMSE, and
@@ -151,13 +152,13 @@ pull_end   <- max(hindcast_run_dates)
 
 cat(sprintf("OWRD pull window: %s to %s\n", pull_start, pull_end))
 
-cp_flow_raw <- get_owrd_hydro(owrd_station, pull_start, pull_end, "Instantaneous_Flow")
+cp_flow_raw <- get_owrd_hydro(owrd_station, pull_start, pull_end, "MDF")
 cp_tmax_raw <- get_owrd_hydro(owrd_station, pull_start, pull_end, "WTEMP15")
 
 cp_flow <- cp_flow_raw |>
   mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
-  group_by(date) |>
-  summarise(cp_flow_mean = mean(instananteous_flow_cfs, na.rm = TRUE)) |>
+  rename(cp_flow_mean = mean_daily_flow_cfs) |> 
+  select(date, cp_flow_mean) |> 
   arrange(date)
 
 cp_tmax <- cp_tmax_raw |>
@@ -180,13 +181,16 @@ cat(sprintf("Camp Polk daily series: %s to %s (%d days)\n",
 ## Model inputs per run date & lead day
 
 Same feature set as the lead-aware model in `rm85-rf-lead-aware.Rmd`: Camp
-Polk's current conditions and trend, the NWS forecast trajectory at every
-day from +1 to +7 from the run date (not a single-day snapshot), and RM
-8.5's own previous-day 7DADM — sourced here from the fresh Camp Polk pull,
-the cached NWS log, and the real RM 8.5 lag instead of live pulls and the
-2025 stand-in. Unlike the historical archive used to *train* the model,
-`nws_cached` is real day-by-day NWS output pulled live each day, so all 7
-trajectory points here are genuine forecasts, not a proxy.
+Polk's current conditions and trend, the NWS forecast trajectory from day
++1 through +*k* (stops at that row's own lead — `dk` always lands exactly
+on the target date, so going further would describe weather after it),
+`julian_dN` paired with each trajectory day rather than one value for the
+whole row, and RM 8.5's own previous-day 7DADM — sourced here from the
+fresh Camp Polk pull, the cached NWS log, and the real RM 8.5 lag instead
+of live pulls and the 2025 stand-in. Unlike the historical archive used to
+*train* the model, `nws_cached` is real day-by-day NWS output pulled live
+each day, so every trajectory point here is a genuine forecast, not a
+proxy.
 
 ```{r build-hindcast-inputs}
 safe1 <- function(x) if (length(x) == 0) NA_real_ else x
@@ -212,11 +216,14 @@ build_hindcast_row <- function(run_date_val, k) {
   cp_flow_m1_val  <- safe1(cp_yest$cp_flow_mean)
   cp_7dadm_m1_val <- safe1(cp_yest$cp_7dadm)
 
-  traj <- map(1:7, function(d) {
+  # Only d1..dk — matches get_forecast_trajectory(lead_k) in
+  # rm85-rf-lead-aware.Rmd exactly, including the per-day julian_dN.
+  traj <- map(1:k, function(d) {
     tibble(
       !!paste0("air_max_d", d) := nws_daily("maxTemperature", run_date_val + d, max,  run_date_val),
       !!paste0("air_min_d", d) := nws_daily("minTemperature", run_date_val + d, min,  run_date_val),
-      !!paste0("cloud_d",   d) := nws_daily("skyCover",       run_date_val + d, mean, run_date_val)
+      !!paste0("cloud_d",   d) := nws_daily("skyCover",       run_date_val + d, mean, run_date_val),
+      !!paste0("julian_d",  d) := yday(run_date_val + d)
     )
   }) |> bind_cols()
 
@@ -228,8 +235,7 @@ build_hindcast_row <- function(run_date_val, k) {
       cp_flow_mean   = safe1(cp_today$cp_flow_mean),
       cp_7dadm       = safe1(cp_today$cp_7dadm),
       cp_flow_trend  = (cp_flow_m1_val  - safe1(cp_trendw$cp_flow_mean)) / (trend_window - 1),
-      cp_7dadm_trend = (cp_7dadm_m1_val - safe1(cp_trendw$cp_7dadm))     / (trend_window - 1),
-      Julian         = yday(fdate)
+      cp_7dadm_trend = (cp_7dadm_m1_val - safe1(cp_trendw$cp_7dadm))     / (trend_window - 1)
     ),
     traj,
     tibble(dadm_m1 = safe1(lag_row$actual_7dadm_C))
@@ -253,8 +259,10 @@ predict_for_lead <- function(k) {
 
   rows <- hindcast_inputs |> filter(lead_days == k)
 
-  feat_7dadm_x <- rows |> select(cp_flow_mean, cp_7dadm, cp_flow_trend, cp_7dadm_trend, Julian,
-                                  paste0("air_max_d", 1:7), paste0("air_min_d", 1:7), paste0("cloud_d", 1:7),
+  # Only d1..dk for this lead's model — same feature set it was trained on.
+  feat_7dadm_x <- rows |> select(cp_flow_mean, cp_7dadm, cp_flow_trend, cp_7dadm_trend,
+                                  paste0("air_max_d", 1:k), paste0("air_min_d", 1:k),
+                                  paste0("cloud_d", 1:k), paste0("julian_d", 1:k),
                                   dadm_m1)
 
   dadm_ok <- complete.cases(feat_7dadm_x)
@@ -262,7 +270,8 @@ predict_for_lead <- function(k) {
   rows$pred_7dadm_C <- NA_real_
   if (any(dadm_ok)) rows$pred_7dadm_C[dadm_ok] <- round(predict(rf_7dadm, feat_7dadm_x[dadm_ok, ]), 2)
 
-  rows |> select(run_date, forecast_date, lead_days, pred_7dadm_C)
+  #rows |> select(run_date, forecast_date, lead_days, pred_7dadm_C) 
+  rows
 }
 
 hindcast_results <- map_dfr(lead_days_vec, predict_for_lead)
@@ -386,7 +395,7 @@ observed_7dadm <- rm_8_5_wide |>
 
 ggplot() +
   geom_line(data = observed_7dadm, aes(x = date, y = actual_7dadm_C), color = "black", linewidth = 0.8) +
-  geom_point(data = forecast_eval, aes(x = forecast_date, y = pred_7dadm_C, color = lead_days), size = 1.6, alpha = 0.8) +
+  geom_line(data = forecast_eval, aes(x = forecast_date, y = pred_7dadm_C, color = lead_days), size = 0.8, alpha = 0.6) +
   geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
   scale_color_manual(values = lead_colors) +
   labs(
