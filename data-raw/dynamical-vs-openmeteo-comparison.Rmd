@@ -1,0 +1,193 @@
+---
+title: "dynamical.org GFS vs. Open-Meteo Historical Forecast Archive"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(here)
+library(whychusModel)
+```
+
+# Objective
+
+`data-raw/pull_dynamical_forecasts.py` pulled dynamical.org's raw GFS
+forecast archive (2021-05-01 to 2025-12-31, leads 1-7, max/min 2m air temp
++ cloud cover) into `data-raw/dynamical_gfs_air_temp_historical.csv`. The
+RF/XGB models are trained on Open-Meteo's `all_historical_forecasts`
+instead. This compares the two sources over their overlapping period —
+same variables, same leads, same location — to check how closely they
+agree, and whether dynamical.org's forecast genuinely varies by lead the
+way Open-Meteo's does not (Open-Meteo's archive was already confirmed
+elsewhere in this project to return the same value for a given calendar
+date regardless of requested lead — a stitched best-estimate series, not
+true per-lead forecast uncertainty).
+
+```{r config}
+lead_days_vec <- 1:7
+lead_colors <- setNames(colorRampPalette(c("#185FA5", "#4E9F50", "#C93312"))(length(lead_days_vec)),
+                        as.character(lead_days_vec))
+```
+
+# Load both sources
+
+```{r load-dynamical}
+dyn <- read_csv(here("data-raw", "dynamical_gfs_air_temp_historical.csv")) |>
+  mutate(valid_date = as.Date(valid_date), init_date = as.Date(init_date)) |>
+  select(valid_date, lead_days, variable, value) |>
+  rename(dyn_value = value)
+
+cat(sprintf("dynamical.org: %d rows, %s to %s, leads %s\n",
+            nrow(dyn), min(dyn$valid_date), max(dyn$valid_date),
+            paste(sort(unique(dyn$lead_days)), collapse = ",")))
+```
+
+```{r load-openmeteo}
+om <- all_historical_forecasts |>
+  filter(lead_days %in% lead_days_vec,
+         valid_date >= min(dyn$valid_date), valid_date <= max(dyn$valid_date)) |>
+  select(valid_date, lead_days, variable, value) |>
+  rename(om_value = value)
+
+cat(sprintf("Open-Meteo (overlapping window): %d rows, %s to %s\n",
+            nrow(om), min(om$valid_date), max(om$valid_date)))
+```
+
+# Does Open-Meteo actually vary by lead over this window?
+
+Confirms (or not) the earlier finding that `all_historical_forecasts`
+returns the same value per calendar date regardless of lead.
+
+```{r om-lead-variance}
+om_variance_by_date <- om |>
+  group_by(valid_date, variable) |>
+  summarise(n_leads = n(), distinct_values = n_distinct(om_value), .groups = "drop")
+
+om_variance_by_date |>
+  group_by(variable) |>
+  summarise(
+    pct_dates_with_only_1_value = mean(distinct_values == 1) * 100,
+    .groups = "drop"
+  ) |>
+  kable(digits = 1, col.names = c("Variable", "% of dates where all leads return the same value"))
+```
+
+# Joined comparison
+
+```{r join}
+joined <- inner_join(dyn, om, by = c("valid_date", "lead_days", "variable")) |>
+  mutate(diff = dyn_value - om_value)
+
+cat(sprintf("Overlapping (valid_date, lead_days, variable) rows: %d\n", nrow(joined)))
+```
+
+```{r metrics-by-variable-lead}
+metrics <- joined |>
+  group_by(variable, lead_days) |>
+  summarise(
+    n = n(),
+    bias = mean(diff),
+    mae = mean(abs(diff)),
+    rmse = sqrt(mean(diff^2)),
+    r = cor(dyn_value, om_value, use = "complete.obs"),
+    .groups = "drop"
+  ) |>
+  arrange(variable, lead_days)
+
+metrics |>
+  kable(digits = 2, col.names = c("Variable", "Lead (days)", "n", "Bias (dyn − OM)", "MAE", "RMSE", "r"))
+```
+
+```{r metrics-summary}
+metrics |>
+  group_by(variable) |>
+  summarise(mean_bias = mean(bias), mean_rmse = mean(rmse), mean_r = mean(r), .groups = "drop") |>
+  kable(digits = 2, col.names = c("Variable", "Mean bias (dyn − OM)", "Mean RMSE", "Mean r"))
+```
+
+# Scatter — dynamical.org vs. Open-Meteo
+
+```{r scatter, fig.height=8}
+joined |>
+  mutate(
+    var_label = recode(variable,
+      "temperature_2m_max" = "Max Air Temp (°C)",
+      "temperature_2m_min" = "Min Air Temp (°C)",
+      "cloud_cover_mean"   = "Cloud Cover (%)"
+    ),
+    lead_label = factor(lead_days, levels = lead_days_vec)
+  ) |>
+  ggplot(aes(x = om_value, y = dyn_value, color = lead_label)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#666666") +
+  geom_point(alpha = 0.15, size = 0.6) +
+  facet_wrap(~var_label, scales = "free") +
+  scale_color_manual(values = lead_colors, name = "Lead (days)") +
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 2))) +
+  labs(
+    title = "dynamical.org GFS vs. Open-Meteo historical forecast archive",
+    subtitle = "Overlapping period, leads 1-7 | dashed line = 1:1",
+    x = "Open-Meteo value", y = "dynamical.org value"
+  ) +
+  theme_minimal()
+```
+
+# Bias by lead
+
+```{r bias-by-lead}
+metrics |>
+  mutate(var_label = recode(variable,
+      "temperature_2m_max" = "Max Air Temp (°C)",
+      "temperature_2m_min" = "Min Air Temp (°C)",
+      "cloud_cover_mean"   = "Cloud Cover (%)")) |>
+  ggplot(aes(x = lead_days, y = bias, fill = factor(lead_days))) +
+  geom_col() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#666666") +
+  facet_wrap(~var_label, scales = "free_y") +
+  scale_fill_manual(values = lead_colors, guide = "none") +
+  labs(
+    title = "Mean bias (dynamical.org − Open-Meteo) by lead day",
+    x = "Lead (days)", y = "Bias"
+  ) +
+  theme_minimal()
+```
+
+# Time series overlay — a representative window
+
+```{r timeseries-sample, fig.height=6}
+sample_window <- joined |>
+  filter(variable == "temperature_2m_max",
+         valid_date >= as.Date("2024-06-01"), valid_date <= as.Date("2024-08-31"))
+
+ggplot(sample_window, aes(x = valid_date)) +
+  #geom_line(aes(y = om_value,  color = as.factor(lead_days)), linewidth = 0.8, alpha = 0.8) + #color = "Open-Meteo",
+  geom_line(aes(y = dyn_value, , color = as.factor(lead_days)), linewidth = 0.8, alpha = 0.8) + #color = "dynamical.org"
+  #scale_color_manual(values = c("Open-Meteo" = "#888780", "dynamical.org" = "#378ADD"), name = NULL) +
+  #facet_grid(~lead_days) + 
+  labs(
+    title = "Max air temperature — summer 2024",
+    x = NULL, y = "Max Air Temp (°C)"
+  ) +
+  theme_minimal()
+```
+
+# Summary
+
+```{r summary-text, echo=FALSE, results='asis'}
+overall <- metrics |> summarise(mean_bias = mean(bias), mean_rmse = mean(rmse), mean_r = mean(r))
+cat(sprintf(
+  "Across all variables and leads over the overlapping period: mean bias %.2f, mean RMSE %.2f, mean r %.3f.\n\n",
+  overall$mean_bias, overall$mean_rmse, overall$mean_r
+))
+```

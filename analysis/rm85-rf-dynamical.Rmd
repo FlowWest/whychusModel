@@ -1,0 +1,543 @@
+---
+title: "RM 8.5 7DADM — Random Forest Trained on dynamical.org GFS"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(zoo)
+library(here)
+library(whychusModel)
+library(randomForest)
+```
+
+# Objective
+
+The production random forest (`rm85_rf_7dadm_lead_aware_lead*.rds`, from
+`rm85-rf-lead-aware.Rmd`) trains its weather trajectory features on
+Open-Meteo's `all_historical_forecasts` — confirmed elsewhere in this
+project to be a "stitched" best-estimate series that returns the same
+value for a given calendar date regardless of requested lead, not a
+genuine per-lead forecast product. `data-raw/pull_dynamical_forecasts.py`
+pulled dynamical.org's raw GFS archive instead, which genuinely varies by
+lead (correlation with Open-Meteo decays from r=0.94 at lead 1 to r=0.81
+at lead 7 for max temp — `data-raw/dynamical-vs-openmeteo-comparison.Rmd`)
+and, after fixing a calendar-day aggregation bug in the pull script,
+agrees closely with Open-Meteo on min temp (bias -0.18°C), with a residual
+~2°C cold bias on max temp attributed to Open-Meteo's elevation
+downscaling.
+
+A head-to-head comparison against the Open-Meteo-trained production model
+on the real 2026 hindcast confirmed dynamical.org training wins at every
+lead (mean bias -1.61°C -> -1.28°C, mean RMSE 1.90 -> 1.64). This document
+drops that comparison and builds the dynamical.org-trained models
+directly: same random forest architecture as `rm85-rf-lead-aware.Rmd` —
+same `fit_rf()` (500 trees, `mtry = floor(features/3)`), same chronological
+80/20 split, same feature slots — with the weather trajectory source
+swapped from Open-Meteo to dynamical.org
+(`data-raw/dynamical_gfs_air_temp_historical.csv`). Camp Polk and RM 8.5's
+own lag remain sourced from the R package as before; only
+`air_max_dN`/`air_min_dN`/`cloud_dN` change source. dynamical.org's
+archive covers 2021-05-01 onward, so training here spans roughly 4.5
+years rather than Open-Meteo's 14 — less data, but genuinely lead-varying
+forecast values instead of a proxy that doesn't change with lead.
+
+Also added here: raw daily Tmax (not the 7-day rolling 7DADM) at both RM
+8.5 and Camp Polk. `dadm_m0`/`cp_7dadm` are both smoothed over the prior
+week, which can lag a fast-developing hot spell; `tmax_m0`/`cp_tmax` give
+the model a same-day-scale signal alongside the week-smoothed ones.
+
+Both RM 8.5 features (`dadm_m0`, `tmax_m0`) use today's own value, not
+yesterday's — the operational script runs at 7pm PST, and RM 8.5's daily
+max occurs by 5-6pm on essentially every day in the real 2026 logger
+record (0% of days after 7pm, 4.1% after 6pm), so today's reading is
+already complete and available at run time, the same as Camp Polk's
+real-time telemetry. A 1-day lag here would be needlessly stale.
+
+```{r config}
+month_start     <- 5
+month_end       <- 10
+lead_days_vec   <- c(1:7)
+ntree           <- 500
+test_frac       <- 0.20
+trend_window    <- 5
+threshold_7dadm <- 20.0
+
+lead_colors <- setNames(colorRampPalette(c("#185FA5", "#4E9F50", "#C93312"))(length(lead_days_vec)),
+                        as.character(lead_days_vec))
+```
+
+# Data & feature construction
+
+```{r load-data}
+rm85_7dadm <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, rm_8_5_7dadm = temperature)
+
+rm85_tmax <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "max") |>
+  select(date, rm_8_5_tmax = temperature)
+
+cp_7dadm <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, cp_7dadm = temperature)
+
+cp_tmax <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "max") |>
+  select(date, cp_tmax = temperature)
+
+cp_flow <- camp_polk_flow_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "mean") |>
+  select(date, cp_flow_mean = flow_cfs)
+
+dyn_raw <- read_csv(here("data-raw", "dynamical_gfs_air_temp_historical.csv")) |>
+  mutate(valid_date = as.Date(valid_date))
+
+cat(sprintf("dynamical.org archive: %s to %s, %d rows\n",
+            min(dyn_raw$valid_date), max(dyn_raw$valid_date), nrow(dyn_raw)))
+```
+
+```{r helpers}
+# dynamical.org equivalent of rm85-rf-lead-aware.Rmd's get_forecast() — no
+# lead-0 fallback needed since every lead 1-7 here is a genuine forecast
+# value (not a proxy that sometimes needs backfilling from an "observed"
+# series).
+get_forecast_dyn <- function(lead_k) {
+  dyn_raw |>
+    filter(lead_days == lead_k) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date, air_max = temperature_2m_max,
+           air_min = temperature_2m_min, cloud_pct = cloud_cover_mean)
+}
+
+get_forecast_trajectory_dyn <- function(lead_k) {
+  offsets <- seq_len(lead_k)
+  day_tables <- map(offsets, function(k) {
+    get_forecast_dyn(k) |>
+      mutate(run_date = date - k) |>
+      transmute(
+        run_date,
+        !!paste0("air_max_d", k) := air_max,
+        !!paste0("air_min_d", k) := air_min,
+        !!paste0("cloud_d",   k) := cloud_pct,
+        !!paste0("julian_d",  k) := yday(date)
+      )
+  })
+  reduce(day_tables, full_join, by = "run_date") |> arrange(run_date)
+}
+
+build_df_dyn <- function(lead_k) {
+  fcst_traj <- get_forecast_trajectory_dyn(lead_k) |>
+    mutate(date = run_date + lead_k) |>
+    select(-run_date)
+
+  cp_flow_run  <- cp_flow  |> mutate(date = date + lead_k)
+  cp_7dadm_run <- cp_7dadm |> mutate(date = date + lead_k)
+  cp_tmax_run  <- cp_tmax  |> mutate(date = date + lead_k)
+
+  cp_flow_m1_tbl  <- cp_flow  |> mutate(date = date + lead_k + 1) |> rename(cp_flow_m1 = cp_flow_mean)
+  cp_flow_mw_tbl  <- cp_flow  |> mutate(date = date + lead_k + trend_window) |> rename(cp_flow_mw = cp_flow_mean)
+  cp_7dadm_m1_tbl <- cp_7dadm |> mutate(date = date + lead_k + 1) |> rename(cp_7dadm_m1 = cp_7dadm)
+  cp_7dadm_mw_tbl <- cp_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(cp_7dadm_mw = cp_7dadm)
+
+  # RM 8.5's own same-day 7DADM/Tmax — no lag. The operational script runs
+  # at 7pm PST; RM 8.5's daily max empirically occurs by 5-6pm on
+  # essentially every observed day in the real 2026 logger record (0% of
+  # days after 7pm, 4.1% after 6pm), so today's own reading is already
+  # complete and available at run time, the same as Camp Polk's real-time
+  # telemetry. A 1-day lag here would be needlessly stale.
+  dadm_m0_tbl <- rm85_7dadm |>
+    mutate(date = date + lead_k) |>
+    rename(dadm_m0 = rm_8_5_7dadm)
+
+  tmax_m0_tbl <- rm85_tmax |>
+    mutate(date = date + lead_k) |>
+    rename(tmax_m0 = rm_8_5_tmax)
+
+  rm85_7dadm |>
+    left_join(cp_flow_run,      by = "date") |>
+    left_join(cp_7dadm_run,     by = "date") |>
+    left_join(cp_tmax_run,      by = "date") |>
+    left_join(fcst_traj,        by = "date") |>
+    left_join(cp_flow_m1_tbl,   by = "date") |>
+    left_join(cp_flow_mw_tbl,   by = "date") |>
+    left_join(cp_7dadm_m1_tbl,  by = "date") |>
+    left_join(cp_7dadm_mw_tbl,  by = "date") |>
+    left_join(dadm_m0_tbl,      by = "date") |>
+    left_join(tmax_m0_tbl,      by = "date") |>
+    mutate(
+      cp_flow_trend  = (cp_flow_m1  - cp_flow_mw)  / (trend_window - 1),
+      cp_7dadm_trend = (cp_7dadm_m1 - cp_7dadm_mw) / (trend_window - 1),
+      month  = month(date)
+    ) |>
+    filter(month >= month_start, month <= month_end) |>
+    drop_na() |>
+    distinct(date, .keep_all = TRUE) |>
+    arrange(date)
+}
+
+get_weather_features <- function(lead_k) {
+  c("cp_flow_mean", "cp_7dadm", "cp_tmax", "cp_flow_trend", "cp_7dadm_trend",
+    paste0("air_max_d", 1:lead_k), paste0("air_min_d", 1:lead_k),
+    paste0("cloud_d", 1:lead_k), paste0("julian_d", 1:lead_k))
+}
+get_persistence_features <- function(lead_k) c(get_weather_features(lead_k), "dadm_m0", "tmax_m0")
+
+split_chronological <- function(df, p = test_frac) {
+  df <- df |> arrange(date)
+  n  <- nrow(df)
+  n_test <- floor(n * p)
+  list(
+    train = df[seq_len(n - n_test), ],
+    test  = df[seq(n - n_test + 1, n), ]
+  )
+}
+
+# Identical to rm85-rf-lead-aware.Rmd's fit_rf().
+fit_rf <- function(train_df, features, target = "rm_8_5_7dadm", seed = 42) {
+  set.seed(seed)
+  randomForest(
+    formula = as.formula(paste(target, "~", paste(features, collapse = " + "))),
+    data    = train_df[, c(features, target)],
+    ntree   = ntree,
+    mtry    = max(1, floor(length(features) / 3)),
+    importance = TRUE
+  )
+}
+
+rmse <- function(pred, obs) sqrt(mean((pred - obs)^2))
+```
+
+# Fit dynamical.org-trained models
+
+```{r fit-models}
+dyn_dfs <- map(lead_days_vec, build_df_dyn)
+names(dyn_dfs) <- as.character(lead_days_vec)
+
+cat("Training row counts by lead (dynamical.org-sourced):\n")
+walk(lead_days_vec, function(k) {
+  df <- dyn_dfs[[as.character(k)]]
+  cat(sprintf("  Lead %d: n=%d, %s to %s\n", k, nrow(df), min(df$date), max(df$date)))
+})
+```
+
+```{r fit-and-split}
+dyn_splits <- map(lead_days_vec, function(k) split_chronological(dyn_dfs[[as.character(k)]]))
+names(dyn_splits) <- as.character(lead_days_vec)
+
+models_rf_dynamical <- map(lead_days_vec, function(k) {
+  fit_rf(dyn_splits[[as.character(k)]]$train, get_persistence_features(k))
+})
+names(models_rf_dynamical) <- as.character(lead_days_vec)
+```
+
+# Test-period performance (within dynamical.org's own window)
+
+Chronological 80/20 split within the 2021-2025 dynamical.org-sourced
+training data — comparable in spirit to `rm85-rf-lead-aware.Rmd`'s test
+table, though on a much shorter, more recent window.
+
+```{r test-period-metrics}
+test_metrics <- map_dfr(lead_days_vec, function(k) {
+  splits <- dyn_splits[[as.character(k)]]
+  model <- models_rf_dynamical[[as.character(k)]]
+  pred <- predict(model, splits$test)
+  obs <- splits$test$rm_8_5_7dadm
+  tibble(lead = k, n = length(obs), bias = mean(pred - obs), rmse = rmse(pred, obs),
+         r2 = cor(pred, obs)^2)
+})
+
+test_metrics |> kable(digits = 3, col.names = c("Lead (days)", "n", "Bias", "RMSE", "R²"))
+```
+
+```{r test-period-plot, fig.height=5}
+test_long <- map_dfr(lead_days_vec, function(k) {
+  splits <- dyn_splits[[as.character(k)]]
+  model <- models_rf_dynamical[[as.character(k)]]
+  tibble(
+    lead = k,
+    date = splits$test$date,
+    observed = splits$test$rm_8_5_7dadm,
+    predicted = predict(model, splits$test)
+  )
+})
+
+observed_7dadm <- test_long |> distinct(date, observed) |> arrange(date)
+
+ggplot() +
+  geom_line(data = observed_7dadm, aes(x = date, y = observed), color = "black", linewidth = 0.8) +
+  geom_line(data = test_long, aes(x = date, y = predicted, color = factor(lead)), size = 0.8, alpha = 0.6) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
+  scale_color_manual(values = lead_colors, name = "Lead (days)") +
+  labs(
+    title = "RM 8.5 7DADM observed (black line) vs. forecast (by lead) — test period (2025)",
+    subtitle = "Dotted red line = HCP action threshold",
+    x = NULL, y = "7DADM (°C)"
+  ) +
+  theme_minimal()
+```
+
+# Variable importance by lead
+
+`%IncMSE` is permutation importance: how much worse the model's test
+error gets when a single feature's values are randomly shuffled, holding
+everything else fixed. A larger value means the model leans on that
+feature more heavily.
+
+```{r importance-by-lead, fig.height=10}
+importance_by_lead <- map_dfr(lead_days_vec, function(k) {
+  imp <- importance(models_rf_dynamical[[as.character(k)]])
+  tibble(lead = k, feature = rownames(imp), pct_inc_mse = imp[, "%IncMSE"])
+})
+
+top_n_features <- 8
+
+importance_top <- importance_by_lead |>
+  group_by(lead) |>
+  slice_max(pct_inc_mse, n = top_n_features) |>
+  arrange(lead, pct_inc_mse) |>
+  mutate(feature_order = row_number()) |>
+  ungroup()
+
+ggplot(importance_top, aes(x = feature_order, y = pct_inc_mse, fill = factor(lead))) +
+  geom_col() +
+  geom_text(aes(label = feature, y = 0), hjust = 0, size = 3, nudge_y = 0.3) +
+  coord_flip() +
+  facet_wrap(~lead, scales = "free", ncol = 2, labeller = as_labeller(function(x) paste("Lead", x, "day(s)"))) +
+  scale_fill_manual(values = lead_colors, guide = "none") +
+  scale_x_continuous(breaks = NULL) +
+  labs(
+    title = paste("Top", top_n_features, "predictors by lead (%IncMSE)"),
+    x = NULL, y = "%IncMSE"
+  ) +
+  theme_minimal()
+```
+
+# Real 2026 hindcast
+
+Same real-data hindcast pipeline as `summer_2026_8_5_performance.Rmd`:
+cached real NWS forecasts, a fresh Camp Polk pull, and the real RM 8.5
+logger record.
+
+```{r hindcast-load-data}
+nws_cached <- read_csv(here("output", "nws-forecasts-log.csv")) |>
+  mutate(run_date = as.Date(run_date), forecast_date = as.Date(forecast_date))
+
+rm_8_5_new <- readxl::read_xlsx(here("data-raw", "data-raw", "WC85 Rimrock bottom 2026-07-01 13_01_25 PDT.xlsx")) |>
+  janitor::clean_names()
+
+rm_8_5 <- rm_8_5_new |>
+  mutate(date = as.Date(lubridate::floor_date(date_time_pdt, "1 day"))) |>
+  group_by(date) |>
+  summarize(max = max(temperature_c, na.rm = TRUE)) |>
+  mutate(`7DADM` = zoo::rollapply(max, width = 7, FUN = mean, fill = NA, align = "right"))
+
+rm_8_5_wide <- rm_8_5 |> select(date, actual_7dadm_C = `7DADM`, actual_tmax_C = max)
+
+hindcast_run_dates <- nws_cached |>
+  distinct(run_date) |>
+  filter(run_date %in% rm_8_5_wide$date) |>
+  pull(run_date) |>
+  sort()
+
+pull_start <- min(hindcast_run_dates) - 10
+pull_end   <- max(hindcast_run_dates)
+
+cp_flow_raw <- get_owrd_hydro("14076100", pull_start, pull_end, "MDF")
+cp_tmax_raw <- get_owrd_hydro("14076100", pull_start, pull_end, "WTEMP15")
+
+cp_flow_hc <- cp_flow_raw |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  rename(cp_flow_mean = mean_daily_flow_cfs) |>
+  select(date, cp_flow_mean) |>
+  arrange(date)
+
+cp_tmax_hc <- cp_tmax_raw |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  group_by(date) |>
+  summarise(cp_tmax = max(instantaneous_water_temp_c, na.rm = TRUE)) |>
+  arrange(date)
+
+cp_7dadm_hc <- cp_tmax_hc |>
+  mutate(cp_7dadm = zoo::rollmean(cp_tmax, k = 7, fill = NA, align = "right"))
+
+cp_daily <- cp_flow_hc |>
+  left_join(cp_tmax_hc, by = "date") |>
+  left_join(select(cp_7dadm_hc, date, cp_7dadm), by = "date")
+```
+
+```{r hindcast-build-inputs}
+safe1 <- function(x) if (length(x) == 0) NA_real_ else x
+
+nws_daily <- function(var, target_date, agg_fn, run_date_val) {
+  vals <- nws_cached |>
+    filter(run_date == run_date_val, variable == var, forecast_date == target_date) |>
+    pull(value)
+  if (length(vals) == 0) return(NA_real_)
+  agg_fn(vals, na.rm = TRUE)
+}
+
+build_hindcast_row <- function(run_date_val, k) {
+  fdate <- run_date_val + k
+
+  cp_today  <- cp_daily |> filter(date == run_date_val)
+  cp_yest   <- cp_daily |> filter(date == run_date_val - 1)
+  cp_trendw <- cp_daily |> filter(date == run_date_val - trend_window)
+  rm85_today <- rm_8_5_wide |> filter(date == run_date_val)
+
+  cp_flow_m1_val  <- safe1(cp_yest$cp_flow_mean)
+  cp_7dadm_m1_val <- safe1(cp_yest$cp_7dadm)
+
+  traj <- map(1:k, function(d) {
+    tibble(
+      !!paste0("air_max_d", d) := nws_daily("maxTemperature", run_date_val + d, max,  run_date_val),
+      !!paste0("air_min_d", d) := nws_daily("minTemperature", run_date_val + d, min,  run_date_val),
+      !!paste0("cloud_d",   d) := nws_daily("skyCover",       run_date_val + d, mean, run_date_val),
+      !!paste0("julian_d",  d) := yday(run_date_val + d)
+    )
+  }) |> bind_cols()
+
+  bind_cols(
+    tibble(
+      run_date = run_date_val, forecast_date = fdate, lead_days = k,
+      cp_flow_mean   = safe1(cp_today$cp_flow_mean),
+      cp_7dadm       = safe1(cp_today$cp_7dadm),
+      cp_tmax        = safe1(cp_today$cp_tmax),
+      cp_flow_trend  = (cp_flow_m1_val  - safe1(cp_trendw$cp_flow_mean)) / (trend_window - 1),
+      cp_7dadm_trend = (cp_7dadm_m1_val - safe1(cp_trendw$cp_7dadm))     / (trend_window - 1)
+    ),
+    traj,
+    tibble(dadm_m0 = safe1(rm85_today$actual_7dadm_C), tmax_m0 = safe1(rm85_today$actual_tmax_C))
+  )
+}
+
+hindcast_grid   <- expand_grid(run_date = hindcast_run_dates, lead_days = lead_days_vec)
+hindcast_inputs <- map2_dfr(hindcast_grid$run_date, hindcast_grid$lead_days, build_hindcast_row)
+```
+
+```{r hindcast-predict}
+predict_for_lead <- function(k) {
+  rows <- hindcast_inputs |> filter(lead_days == k)
+  features <- get_persistence_features(k)
+  feat_x <- rows |> select(all_of(features))
+  ok <- complete.cases(feat_x)
+
+  rows$pred_7dadm_C <- NA_real_
+  if (any(ok)) {
+    rows$pred_7dadm_C[ok] <- predict(models_rf_dynamical[[as.character(k)]], feat_x[ok, ])
+  }
+  rows
+}
+
+hindcast_results <- map_dfr(lead_days_vec, predict_for_lead)
+
+forecast_eval <- hindcast_results |>
+  inner_join(rm_8_5_wide, by = c("forecast_date" = "date")) |>
+  filter(!is.na(actual_7dadm_C)) |>
+  mutate(lead_days = factor(lead_days, levels = lead_days_vec))
+
+cat(sprintf("Forecast/observation pairs available for evaluation: %d\n", nrow(forecast_eval)))
+```
+
+```{r hindcast-metrics}
+metrics_table <- forecast_eval |>
+  mutate(error = pred_7dadm_C - actual_7dadm_C) |>
+  group_by(lead_days) |>
+  summarise(n = n(), bias = mean(error, na.rm = TRUE), rmse = sqrt(mean(error^2, na.rm = TRUE)), .groups = "drop")
+
+metrics_table |> kable(digits = 3, col.names = c("Lead (days)", "n", "Bias", "RMSE"))
+```
+
+```{r hindcast-metrics-summary}
+metrics_table |>
+  summarise(mean_bias = mean(bias), mean_rmse = mean(rmse)) |>
+  kable(digits = 3, col.names = c("Mean bias (across leads)", "Mean RMSE (across leads)"))
+```
+
+```{r hindcast-plot, fig.height=5}
+ggplot(forecast_eval, aes(x = forecast_date)) +
+  geom_line(aes(y = actual_7dadm_C), color = "black", linewidth = 0.8) +
+  geom_line(aes(y = pred_7dadm_C, color = lead_days), alpha = 0.8) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
+  scale_color_manual(values = lead_colors) +
+  labs(
+    title = "RM 8.5 7DADM — real 2026 observed (black) vs. dynamical.org-trained RF forecast (points, by lead)",
+    x = NULL, y = "7DADM (°C)", color = "Lead (days)"
+  ) +
+  theme_minimal()
+```
+
+# Threshold-exceedance performance
+
+Beyond raw temperature error, what matters operationally is whether the
+forecast correctly flags days that cross the HCP action threshold
+(7DADM >= `r threshold_7dadm`°C). "Exceedance" here means 7DADM at or
+above that threshold — `actual_exceed` for the real observation,
+`pred_exceed` for the forecast. Each forecast/observation pair falls into
+one of four outcomes:
+
+- **True positive (TP)**: forecast predicted exceedance, and it actually happened.
+- **True negative (TN)**: forecast predicted no exceedance, and none happened.
+- **False positive (FP)**: forecast predicted exceedance, but it didn't happen (a false alarm).
+- **False negative (FN)**: forecast predicted no exceedance, but one happened (a missed exceedance).
+
+The four metrics below are standard confusion-matrix rates built from
+those counts:
+
+- **Accuracy** = (TP + TN) / n — the share of all forecasts that got the exceed/no-exceed call right, in either direction.
+- **Sensitivity** (a.k.a. recall) = TP / (TP + FN) — of the days that actually exceeded, the fraction the model caught. Low sensitivity means missed exceedances — the operationally riskier failure mode, since it means the model didn't warn when it should have.
+- **Specificity** = TN / (TN + FP) — of the days that did *not* exceed, the fraction correctly left unflagged. Low specificity means false alarms.
+- **Precision** = TP / (TP + FP) — of the days the model *did* flag as exceeding, the fraction that actually did. Low precision means the flag isn't trustworthy even when raised.
+
+```{r hindcast-exceedance}
+exceedance_eval <- forecast_eval |>
+  mutate(
+    actual_exceed = actual_7dadm_C >= threshold_7dadm,
+    pred_exceed   = pred_7dadm_C >= threshold_7dadm
+  )
+
+confusion_summary <- function(df, pred_col, actual_col) {
+  df <- df |> filter(!is.na({{ pred_col }}), !is.na({{ actual_col }}))
+  pred <- df |> pull({{ pred_col }}); actual <- df |> pull({{ actual_col }})
+  tp <- sum(pred & actual); tn <- sum(!pred & !actual)
+  fp <- sum(pred & !actual); fn <- sum(!pred & actual)
+  tibble(n = nrow(df), accuracy = (tp + tn) / nrow(df),
+         sensitivity = if (tp + fn > 0) tp / (tp + fn) else NA_real_,
+         specificity = if (tn + fp > 0) tn / (tn + fp) else NA_real_,
+         precision   = if (tp + fp > 0) tp / (tp + fp) else NA_real_)
+}
+
+exceedance_eval |>
+  group_by(lead_days) |>
+  group_modify(~ confusion_summary(.x, pred_exceed, actual_exceed)) |>
+  ungroup() |>
+  kable(digits = 2, col.names = c("Lead (days)", "n", "Accuracy", "Sensitivity", "Specificity", "Precision"))
+```
+
+# Saved artifacts
+
+```{r save-models}
+walk(lead_days_vec, function(k) {
+  saveRDS(models_rf_dynamical[[as.character(k)]],
+          here("output", paste0("rm85_rf_7dadm_dynamical_lead", k, ".rds")))
+})
+cat("Models saved to output/rm85_rf_7dadm_dynamical_lead*.rds\n")
+```
