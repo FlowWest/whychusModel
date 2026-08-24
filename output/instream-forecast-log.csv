@@ -296,3 +296,6 @@ run_date,forecast_date,lead_days,pred_tmax_C,pred_7dadm_C,actual_tmax_C,actual_7
 2026-08-22,2026-08-23,1,20.77,21.02,NA,NA,dummy data,NA,NA,NA,NA
 2026-08-22,2026-08-25,3,20.73,21.08,NA,NA,dummy data,NA,NA,NA,NA
 2026-08-22,2026-08-29,7,20.65,21.03,NA,NA,dummy data,NA,NA,NA,NA
+2026-08-23,2026-08-24,1,19.91,20.58,NA,NA,dummy data,NA,NA,NA,NA
+2026-08-23,2026-08-26,3,19.98,20.54,NA,NA,dummy data,NA,NA,NA,NA
+2026-08-23,2026-08-30,7,20.02,20.52,NA,NA,dummy data,NA,NA,NA,NA
