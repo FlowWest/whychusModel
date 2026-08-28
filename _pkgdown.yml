@@ -9,6 +9,11 @@ navbar:
     right: [search, github]
 
 articles:
+- title: Model development
+  navbar: Model development
+  contents:
+  - model-development-history
+
 - title: Data sources
   navbar: Data sources
   contents:

@@ -1,0 +1,10 @@
+pandoc: 3.10.1
+pkgdown: 2.2.0
+pkgdown_sha: ~
+articles:
+  air-temperature-source: air-temperature-source.html
+  model-development-history: model-development-history.html
+last_built: 2026-08-28T22:07Z
+urls:
+  reference: https://flowwest.github.io/udwc_temperature/reference
+  article: https://flowwest.github.io/udwc_temperature/articles
