@@ -1,0 +1,919 @@
+---
+title: "RM 8.5 7DADM — Random Forest on a Change-from-Today Target"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(zoo)
+library(here)
+library(whychusModel)
+library(randomForest)
+library(cowplot)
+```
+
+# Objective
+
+`rm85-rf-dynamical.Rmd` trains a random forest to predict RM 8.5's 7DADM
+directly. Against the real 2026 NWS hindcast that model carries a cold bias
+that grows with lead and concentrates in exactly the conditions the HCP
+threshold cares about — reaching -1.85°C on days observed at or above 20°C
+at lead 7, where it barely outperforms simply carrying today's value
+forward (RMSE 2.01 vs. persistence's 2.05).
+
+Diagnosis (worked through in detail before this document was written):
+
+* **Not** a warm-tail extrapolation problem. 31% of training rows are
+  already ≥20°C and the training maximum (24.06°C) exceeds anything
+  observed in 2026 (23.1°C); the prediction ceiling gap is under 0.9°C.
+* It is a **train/serve mismatch**. The model trains on archived GFS
+  weather but is served real NWS forecasts, and those two disagree by
+  1.7°C MAE at lead 1 growing to 2.8°C at lead 7 (cloud cover is worse
+  still: +15 pp bias, r falling to 0.58). A model that predicts an
+  absolute temperature leans hard on those mismatched weather columns, so
+  it degrades badly at long leads in the real world.
+
+This document reframes the target as the **change from today** rather than
+the absolute level: the forest is trained on `rm_8_5_7dadm - dadm_m0` and
+the prediction adds `dadm_m0` back. Because `dadm_m0` is a real RM 8.5
+observation — identical at training and serving time — the model is
+anchored on something the mismatch cannot corrupt, and only has to learn
+the correction. Measured on the real 2026 hindcast, that single change is
+worth -0.29 to -0.40 RMSE (paired t-test, p < 0.001), roughly 6-10x larger
+than any effect from swapping the weather source itself.
+
+Two supporting additions, each independently significant (p < 0.001):
+
+* **RM 8.5's own trend** (`dadm_trend`, `tmax_trend`) — the model
+  previously had trend features for Camp Polk but none for RM 8.5 itself.
+* **Trajectory summaries** (`traj_air_max_max`, `traj_air_max_mean`,
+  `traj_air_min_mean`, `traj_warming`) — at lead 7 the forecast spans 28
+  individual columns and `mtry` samples only a third of them, so explicit
+  summaries concentrate a signal the forest otherwise has to rediscover.
+
+Everything else is unchanged from `rm85-rf-dynamical.Rmd`: same
+dynamical.org GFS weather source, same 500-tree forests, same
+chronological 80/20 split, same same-day RM 8.5 inputs. A head-to-head
+against Open-Meteo's Previous Runs archive found no significant difference
+in skill at this configuration (p = 0.46), so the source is left as-is.
+
+```{r config}
+month_start     <- 5
+month_end       <- 10
+lead_days_vec   <- c(1:7)
+ntree           <- 500
+test_frac       <- 0.20
+trend_window    <- 5
+threshold_7dadm <- 20.0
+
+# Most recent RM 8.5 logger export. Kept as a config value because the
+# hindcast window is bounded by it — point this at the newest export and
+# keep it in step with summer_2026_8_5_performance.Rmd.
+rm85_logger_file <- "WC85 Rimrock bottom 2026-08-13 09_52_44 PDT.xlsx"
+
+lead_colors <- setNames(colorRampPalette(c("#185FA5", "#4E9F50", "#C93312"))(length(lead_days_vec)),
+                        as.character(lead_days_vec))
+```
+
+# Data & feature construction
+
+```{r load-data}
+rm85_7dadm <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, rm_8_5_7dadm = temperature)
+
+rm85_tmax <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "max") |>
+  select(date, rm_8_5_tmax = temperature)
+
+cp_7dadm <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "7DADM") |>
+  select(date, cp_7dadm = temperature)
+
+cp_tmax <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "max") |>
+  select(date, cp_tmax = temperature)
+
+cp_flow <- camp_polk_flow_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic == "mean") |>
+  select(date, cp_flow_mean = flow_cfs)
+
+dyn_raw <- read_csv(here("data-raw", "dynamical_gfs_air_temp_historical.csv")) |>
+  mutate(valid_date = as.Date(valid_date))
+
+cat(sprintf("dynamical.org archive: %s to %s, %d rows\n",
+            min(dyn_raw$valid_date), max(dyn_raw$valid_date), nrow(dyn_raw)))
+```
+
+```{r helpers}
+get_forecast_dyn <- function(lead_k) {
+  dyn_raw |>
+    filter(lead_days == lead_k) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date, air_max = temperature_2m_max,
+           air_min = temperature_2m_min, cloud_pct = cloud_cover_mean)
+}
+
+get_forecast_trajectory_dyn <- function(lead_k) {
+  day_tables <- map(seq_len(lead_k), function(k) {
+    get_forecast_dyn(k) |>
+      mutate(run_date = date - k) |>
+      transmute(
+        run_date,
+        !!paste0("air_max_d", k) := air_max,
+        !!paste0("air_min_d", k) := air_min,
+        !!paste0("cloud_d",   k) := cloud_pct,
+        !!paste0("julian_d",  k) := yday(date)
+      )
+  })
+  reduce(day_tables, full_join, by = "run_date") |> arrange(run_date)
+}
+
+# Collapses the d1..dk trajectory into a handful of explicit summaries. At
+# lead 7 the raw trajectory is 28 columns and mtry samples ~9 of them, so a
+# tree often misses the days that actually matter; these give it the shape
+# of the week directly. `traj_warming` (last day minus first) is the
+# ramping-up signal that a persistence-anchored model needs in order to
+# break away from today's value during a developing hot spell.
+add_trajectory_summaries <- function(df, lead_k) {
+  air_max_cols <- as.matrix(df[, paste0("air_max_d", 1:lead_k), drop = FALSE])
+  air_min_cols <- as.matrix(df[, paste0("air_min_d", 1:lead_k), drop = FALSE])
+  df$traj_air_max_max  <- apply(air_max_cols, 1, max)
+  df$traj_air_max_mean <- apply(air_max_cols, 1, mean)
+  df$traj_air_min_mean <- apply(air_min_cols, 1, mean)
+  df$traj_warming      <- air_max_cols[, lead_k] - air_max_cols[, 1]
+  df
+}
+
+build_df_dyn <- function(lead_k) {
+  fcst_traj <- get_forecast_trajectory_dyn(lead_k) |>
+    mutate(date = run_date + lead_k) |>
+    select(-run_date)
+
+  joined <- rm85_7dadm |>
+    left_join(cp_flow  |> mutate(date = date + lead_k), by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k), by = "date") |>
+    left_join(cp_tmax  |> mutate(date = date + lead_k), by = "date") |>
+    left_join(fcst_traj, by = "date") |>
+    left_join(cp_flow  |> mutate(date = date + lead_k + 1)            |> rename(cp_flow_m1  = cp_flow_mean), by = "date") |>
+    left_join(cp_flow  |> mutate(date = date + lead_k + trend_window) |> rename(cp_flow_mw  = cp_flow_mean), by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k + 1)            |> rename(cp_7dadm_m1 = cp_7dadm),     by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(cp_7dadm_mw = cp_7dadm),     by = "date") |>
+    # RM 8.5's own same-day values — no lag. The operational script runs at
+    # 7pm PST and RM 8.5's daily max lands by 5-6pm on essentially every day
+    # in the real 2026 record (0% after 7pm, 4.1% after 6pm), so today's
+    # reading is complete at run time, like Camp Polk's telemetry.
+    left_join(rm85_7dadm |> mutate(date = date + lead_k)                |> rename(dadm_m0 = rm_8_5_7dadm), by = "date") |>
+    left_join(rm85_tmax  |> mutate(date = date + lead_k)                |> rename(tmax_m0 = rm_8_5_tmax),  by = "date") |>
+    left_join(rm85_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(dadm_mw = rm_8_5_7dadm), by = "date") |>
+    left_join(rm85_tmax  |> mutate(date = date + lead_k + trend_window) |> rename(tmax_mw = rm_8_5_tmax),  by = "date") |>
+    mutate(
+      cp_flow_trend  = (cp_flow_m1  - cp_flow_mw)  / (trend_window - 1),
+      cp_7dadm_trend = (cp_7dadm_m1 - cp_7dadm_mw) / (trend_window - 1),
+      # RM 8.5's own rate of change over the trend window — the model
+      # previously had this for Camp Polk but not for the site itself.
+      dadm_trend     = (dadm_m0 - dadm_mw) / trend_window,
+      tmax_trend     = (tmax_m0 - tmax_mw) / trend_window,
+      month = month(date)
+    ) |>
+    filter(month >= month_start, month <= month_end) |>
+    drop_na() |>
+    distinct(date, .keep_all = TRUE) |>
+    arrange(date)
+
+  add_trajectory_summaries(joined, lead_k)
+}
+
+get_model_features <- function(lead_k) {
+  c("cp_flow_mean", "cp_7dadm", "cp_tmax", "cp_flow_trend", "cp_7dadm_trend",
+    paste0("air_max_d", 1:lead_k), paste0("air_min_d", 1:lead_k),
+    paste0("cloud_d", 1:lead_k), paste0("julian_d", 1:lead_k),
+    "dadm_m0", "tmax_m0", "dadm_trend", "tmax_trend",
+    "traj_air_max_max", "traj_air_max_mean", "traj_air_min_mean", "traj_warming")
+}
+
+split_chronological <- function(df, p = test_frac) {
+  df <- df |> arrange(date)
+  n  <- nrow(df)
+  n_test <- floor(n * p)
+  list(train = df[seq_len(n - n_test), ], test = df[seq(n - n_test + 1, n), ])
+}
+
+# The forest is fit on the CHANGE from today, not the level. `dadm_m0` stays
+# in the feature set as well, so the model can condition the size of the
+# correction on where the site currently sits.
+fit_rf_delta <- function(train_df, features, seed = 42) {
+  d <- train_df[, features, drop = FALSE]
+  d$delta_7dadm <- train_df$rm_8_5_7dadm - train_df$dadm_m0
+  set.seed(seed)
+  randomForest(delta_7dadm ~ ., data = d, ntree = ntree,
+               mtry = max(1, floor(length(features) / 3)), importance = TRUE)
+}
+
+# Always pair predict() with adding dadm_m0 back — the saved models return a
+# change, not a temperature.
+predict_rf_delta <- function(model, newdata) {
+  predict(model, newdata) + newdata$dadm_m0
+}
+
+rmse <- function(pred, obs) sqrt(mean((pred - obs)^2))
+```
+
+# Fit the models
+
+```{r fit-models}
+dyn_dfs <- map(lead_days_vec, build_df_dyn)
+names(dyn_dfs) <- as.character(lead_days_vec)
+
+cat("Training row counts by lead:\n")
+walk(lead_days_vec, function(k) {
+  df <- dyn_dfs[[as.character(k)]]
+  cat(sprintf("  Lead %d: n=%d, %s to %s\n", k, nrow(df), min(df$date), max(df$date)))
+})
+```
+
+```{r fit-and-split}
+dyn_splits <- map(lead_days_vec, function(k) split_chronological(dyn_dfs[[as.character(k)]]))
+names(dyn_splits) <- as.character(lead_days_vec)
+
+models_rf_delta <- map(lead_days_vec, function(k) {
+  fit_rf_delta(dyn_splits[[as.character(k)]]$train, get_model_features(k))
+})
+names(models_rf_delta) <- as.character(lead_days_vec)
+```
+
+# Test-period performance
+
+Chronological 80/20 split within the 2021-2025 dynamical.org-sourced
+training data. Metrics are reported on the reconstructed temperature
+(`dadm_m0` + predicted change), not on the change itself, so they are
+directly comparable to the other documents in this project.
+
+```{r test-period-metrics}
+test_metrics <- map_dfr(lead_days_vec, function(k) {
+  splits <- dyn_splits[[as.character(k)]]
+  pred <- predict_rf_delta(models_rf_delta[[as.character(k)]], splits$test)
+  obs  <- splits$test$rm_8_5_7dadm
+  tibble(lead = k, n = length(obs), bias = mean(pred - obs),
+         rmse = rmse(pred, obs), r2 = cor(pred, obs)^2)
+})
+
+test_metrics |> kable(digits = 3, col.names = c("Lead (days)", "n", "Bias", "RMSE", "R²"))
+```
+
+```{r test-period-predictions}
+test_long <- map_dfr(lead_days_vec, function(k) {
+  splits <- dyn_splits[[as.character(k)]]
+  tibble(lead = k, date = splits$test$date,
+         observed = splits$test$rm_8_5_7dadm,
+         predicted = predict_rf_delta(models_rf_delta[[as.character(k)]], splits$test),
+         persistence = splits$test$dadm_m0) |>
+    mutate(error = predicted - observed)
+})
+
+lead_label <- function(x) paste("Lead", x, "day(s)")
+```
+
+Faceting by lead rather than overlaying all seven keeps the forecast track
+readable and makes the widening of errors with lead visible directly.
+Leads 1, 4 and 7 are shown as representative; every lead is summarised in
+the panels that follow.
+
+```{r test-period-plot, fig.height=8}
+test_long |>
+  filter(lead %in% c(1, 4, 7)) |>
+  mutate(panel = lead_label(lead)) |>
+  ggplot(aes(x = date)) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
+  geom_line(aes(y = observed), color = "black", linewidth = 0.7) +
+  geom_line(aes(y = predicted), color = "#185FA5", linewidth = 0.7) +
+  facet_wrap(~panel, ncol = 1) +
+  labs(title = "RM 8.5 7DADM — observed (black) vs. forecast (blue), test period",
+       subtitle = "Dotted red line = HCP action threshold",
+       x = NULL, y = "7DADM (°C)") +
+  theme_minimal()
+```
+
+# Variable importance by lead
+
+`%IncMSE` is permutation importance: how much worse the model's error gets
+when a single feature's values are randomly shuffled, holding everything
+else fixed. Note that these forests predict the *change* from today, so
+importance here describes what drives the correction — not what drives the
+temperature level (which `dadm_m0` supplies directly).
+
+```{r importance-by-lead, fig.height=10}
+importance_by_lead <- map_dfr(lead_days_vec, function(k) {
+  imp <- importance(models_rf_delta[[as.character(k)]])
+  tibble(lead = k, feature = rownames(imp), pct_inc_mse = imp[, "%IncMSE"])
+})
+
+top_n_features <- 8
+
+importance_top <- importance_by_lead |>
+  group_by(lead) |>
+  slice_max(pct_inc_mse, n = top_n_features) |>
+  arrange(lead, pct_inc_mse) |>
+  mutate(feature_order = row_number()) |>
+  ungroup()
+
+ggplot(importance_top, aes(x = feature_order, y = pct_inc_mse, fill = factor(lead))) +
+  geom_col() +
+  geom_text(aes(label = feature, y = 0), hjust = 0, size = 3, nudge_y = 0.3) +
+  coord_flip() +
+  facet_wrap(~lead, scales = "free", ncol = 2,
+             labeller = as_labeller(function(x) paste("Lead", x, "day(s)"))) +
+  scale_fill_manual(values = lead_colors, guide = "none") +
+  scale_x_continuous(breaks = NULL) +
+  labs(title = paste("Top", top_n_features, "predictors of the change from today (%IncMSE)"),
+       x = NULL, y = "%IncMSE") +
+  theme_minimal()
+```
+
+# Real 2026 hindcast
+
+Same real-data pipeline as `summer_2026_8_5_performance.Rmd`: cached real
+NWS forecasts, a fresh Camp Polk pull, and the real RM 8.5 logger record.
+This is the evaluation that matters — it is the only one where the weather
+inputs come from the NWS product actually used operationally rather than
+from the GFS archive the model was trained on.
+
+```{r hindcast-load-data}
+nws_cached <- read_csv(here("output", "nws-forecasts-log.csv")) |>
+  mutate(run_date = as.Date(run_date), forecast_date = as.Date(forecast_date))
+
+rm_8_5_new <- readxl::read_xlsx(here("data-raw", "data-raw", rm85_logger_file)) |>
+  janitor::clean_names()
+
+rm_8_5 <- rm_8_5_new |>
+  mutate(date = as.Date(lubridate::floor_date(date_time_pdt, "1 day"))) |>
+  group_by(date) |>
+  summarize(max = max(temperature_c, na.rm = TRUE), .groups = "drop") |>
+  mutate(`7DADM` = zoo::rollapply(max, width = 7, FUN = mean, fill = NA, align = "right"))
+
+rm_8_5_wide <- rm_8_5 |> select(date, actual_7dadm_C = `7DADM`, actual_tmax_C = max)
+
+hindcast_run_dates <- nws_cached |>
+  distinct(run_date) |>
+  filter(run_date %in% rm_8_5_wide$date) |>
+  pull(run_date) |>
+  sort()
+
+pull_start <- min(hindcast_run_dates) - 10
+pull_end   <- max(hindcast_run_dates)
+
+cp_flow_raw <- get_owrd_hydro("14076100", pull_start, pull_end, "MDF")
+cp_tmax_raw <- get_owrd_hydro("14076100", pull_start, pull_end, "WTEMP15")
+
+cp_flow_hc <- cp_flow_raw |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  rename(cp_flow_mean = mean_daily_flow_cfs) |>
+  select(date, cp_flow_mean) |>
+  arrange(date)
+
+cp_tmax_hc <- cp_tmax_raw |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  group_by(date) |>
+  summarise(cp_tmax = max(instantaneous_water_temp_c, na.rm = TRUE), .groups = "drop") |>
+  arrange(date)
+
+cp_7dadm_hc <- cp_tmax_hc |>
+  mutate(cp_7dadm = zoo::rollmean(cp_tmax, k = 7, fill = NA, align = "right"))
+
+cp_daily <- cp_flow_hc |>
+  left_join(cp_tmax_hc, by = "date") |>
+  left_join(select(cp_7dadm_hc, date, cp_7dadm), by = "date")
+```
+
+```{r hindcast-build-inputs}
+safe1 <- function(x) if (length(x) == 0) NA_real_ else x
+
+nws_daily <- function(var, target_date, agg_fn, run_date_val) {
+  vals <- nws_cached |>
+    filter(run_date == run_date_val, variable == var, forecast_date == target_date) |>
+    pull(value)
+  if (length(vals) == 0) return(NA_real_)
+  agg_fn(vals, na.rm = TRUE)
+}
+
+build_hindcast_row <- function(run_date_val, k) {
+  cp_today   <- cp_daily    |> filter(date == run_date_val)
+  cp_yest    <- cp_daily    |> filter(date == run_date_val - 1)
+  cp_trendw  <- cp_daily    |> filter(date == run_date_val - trend_window)
+  rm85_today <- rm_8_5_wide |> filter(date == run_date_val)
+  rm85_trendw<- rm_8_5_wide |> filter(date == run_date_val - trend_window)
+
+  traj <- map(1:k, function(d) {
+    tibble(
+      !!paste0("air_max_d", d) := nws_daily("maxTemperature", run_date_val + d, max,  run_date_val),
+      !!paste0("air_min_d", d) := nws_daily("minTemperature", run_date_val + d, min,  run_date_val),
+      !!paste0("cloud_d",   d) := nws_daily("skyCover",       run_date_val + d, mean, run_date_val),
+      !!paste0("julian_d",  d) := yday(run_date_val + d)
+    )
+  }) |> bind_cols()
+
+  bind_cols(
+    tibble(
+      run_date = run_date_val, forecast_date = run_date_val + k, lead_days = k,
+      cp_flow_mean   = safe1(cp_today$cp_flow_mean),
+      cp_7dadm       = safe1(cp_today$cp_7dadm),
+      cp_tmax        = safe1(cp_today$cp_tmax),
+      cp_flow_trend  = (safe1(cp_yest$cp_flow_mean) - safe1(cp_trendw$cp_flow_mean)) / (trend_window - 1),
+      cp_7dadm_trend = (safe1(cp_yest$cp_7dadm)     - safe1(cp_trendw$cp_7dadm))     / (trend_window - 1)
+    ),
+    traj,
+    tibble(
+      dadm_m0    = safe1(rm85_today$actual_7dadm_C),
+      tmax_m0    = safe1(rm85_today$actual_tmax_C),
+      dadm_trend = (safe1(rm85_today$actual_7dadm_C) - safe1(rm85_trendw$actual_7dadm_C)) / trend_window,
+      tmax_trend = (safe1(rm85_today$actual_tmax_C)  - safe1(rm85_trendw$actual_tmax_C))  / trend_window
+    )
+  )
+}
+
+hindcast_grid   <- expand_grid(run_date = hindcast_run_dates, lead_days = lead_days_vec)
+hindcast_inputs <- map2_dfr(hindcast_grid$run_date, hindcast_grid$lead_days, build_hindcast_row)
+
+# Trajectory summaries must be added per lead, since they span d1..dk.
+hindcast_by_lead <- map(lead_days_vec, function(k) {
+  add_trajectory_summaries(hindcast_inputs |> filter(lead_days == k), k)
+})
+names(hindcast_by_lead) <- as.character(lead_days_vec)
+
+cat(sprintf("Hindcast input rows: %d\n", nrow(hindcast_inputs)))
+```
+
+```{r hindcast-predict}
+predict_for_lead <- function(k) {
+  rows <- hindcast_by_lead[[as.character(k)]]
+  features <- get_model_features(k)
+  feat_x <- rows[, c(features, "dadm_m0"), drop = FALSE]
+  ok <- complete.cases(feat_x)
+
+  rows$pred_7dadm_C <- NA_real_
+  if (any(ok)) {
+    rows$pred_7dadm_C[ok] <- predict_rf_delta(models_rf_delta[[as.character(k)]], rows[ok, , drop = FALSE])
+  }
+  rows |> select(run_date, forecast_date, lead_days, dadm_m0, pred_7dadm_C)
+}
+
+hindcast_results <- map_dfr(lead_days_vec, predict_for_lead)
+
+forecast_eval <- hindcast_results |>
+  inner_join(rm_8_5_wide, by = c("forecast_date" = "date")) |>
+  filter(!is.na(pred_7dadm_C), !is.na(actual_7dadm_C)) |>
+  mutate(dadm_error = pred_7dadm_C - actual_7dadm_C,
+         lead_days  = factor(lead_days, levels = lead_days_vec))
+
+cat(sprintf("Forecast/observation pairs available for evaluation: %d\n", nrow(forecast_eval)))
+```
+
+```{r hindcast-metrics}
+metrics_table <- forecast_eval |>
+  group_by(lead_days) |>
+  summarise(n = n(), bias = mean(dadm_error), mae = mean(abs(dadm_error)),
+            rmse = sqrt(mean(dadm_error^2)), .groups = "drop")
+
+metrics_table |>
+  kable(digits = 3, col.names = c("Lead (days)", "n", "Bias", "MAE", "RMSE"))
+```
+
+## Warm conditions only
+
+The regime the HCP threshold actually cares about, and the one the previous
+design handled worst.
+
+```{r hindcast-warm-metrics}
+forecast_eval |>
+  filter(actual_7dadm_C >= threshold_7dadm) |>
+  group_by(lead_days) |>
+  summarise(n = n(), bias = mean(dadm_error), mae = mean(abs(dadm_error)),
+            rmse = sqrt(mean(dadm_error^2)), .groups = "drop") |>
+  kable(digits = 3, col.names = c("Lead (days)", "n", "Bias", "MAE", "RMSE"))
+```
+
+## Skill against persistence
+
+A forecast is only worth running if it beats carrying today's value
+forward. `dadm_m0` is exactly that null model, and because this design is
+anchored on it the comparison is the honest test of whether the forest is
+adding anything.
+
+```{r hindcast-vs-persistence}
+bind_rows(
+  forecast_eval |> transmute(lead_days, err = dadm_error, model = "RF (change-from-today)"),
+  forecast_eval |> transmute(lead_days, err = dadm_m0 - actual_7dadm_C, model = "persistence (dadm_m0)")
+) |>
+  group_by(model, lead_days) |>
+  summarise(rmse = sqrt(mean(err^2)), .groups = "drop") |>
+  pivot_wider(names_from = model, values_from = rmse) |>
+  mutate(`skill gain` = `persistence (dadm_m0)` - `RF (change-from-today)`) |>
+  kable(digits = 3)
+```
+
+```{r hindcast-plot, fig.height=8}
+forecast_eval |>
+  mutate(lead_int = as.integer(as.character(lead_days))) |>
+  filter(lead_int %in% c(1, 4, 7)) |>
+  mutate(panel = lead_label(lead_int)) |>
+  ggplot(aes(x = forecast_date)) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
+  geom_line(aes(y = actual_7dadm_C), color = "black", linewidth = 0.7) +
+  geom_line(aes(y = pred_7dadm_C), color = "#185FA5", linewidth = 0.7) +
+  facet_wrap(~panel, ncol = 1) +
+  labs(title = "RM 8.5 7DADM — real 2026 observed (black) vs. forecast (blue)",
+       subtitle = "Dotted red line = HCP action threshold",
+       x = NULL, y = "7DADM (°C)") +
+  theme_minimal()
+```
+
+## Forecast vs. observed
+
+The 1:1 line is the target. Spread widening with lead is expected; a tilt
+away from the diagonal would signal bias, and points drifting below it at
+the warm end would be the cold-bias failure this design was built to fix.
+
+```{r hindcast-scatter, fig.height=6}
+forecast_eval |>
+  mutate(panel = lead_label(as.integer(as.character(lead_days)))) |>
+  ggplot(aes(x = actual_7dadm_C, y = pred_7dadm_C)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#666666") +
+  geom_vline(xintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A", alpha = 0.6) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A", alpha = 0.6) +
+  geom_point(aes(color = lead_days), alpha = 0.6, size = 1.2) +
+  facet_wrap(~panel, ncol = 4) +
+  scale_color_manual(values = lead_colors, guide = "none") +
+  coord_equal() +
+  labs(title = "Forecast vs. observed 7DADM — real 2026 hindcast",
+       subtitle = "Dashed = 1:1; dotted red = HCP threshold on both axes",
+       x = "Observed 7DADM (°C)", y = "Forecast 7DADM (°C)") +
+  theme_minimal()
+```
+
+## Error structure
+
+Two things worth seeing that a summary table hides: how error spreads with
+lead, and whether it depends on how warm it actually is. The second panel
+is the direct check on warm-season behaviour — a flat line near zero
+across the x-axis is what "no warm bias" looks like.
+
+```{r hindcast-error-panels, fig.height=5}
+p_box <- forecast_eval |>
+  ggplot(aes(x = lead_days, y = dadm_error, fill = lead_days)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#666666") +
+  geom_boxplot(alpha = 0.85, outlier.size = 0.8) +
+  scale_fill_manual(values = lead_colors, guide = "none") +
+  labs(title = "Error by lead", x = "Lead (days)", y = "Forecast − observed (°C)") +
+  theme_minimal()
+
+p_warm <- forecast_eval |>
+  ggplot(aes(x = actual_7dadm_C, y = dadm_error)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#666666") +
+  geom_vline(xintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
+  geom_point(aes(color = lead_days), alpha = 0.5, size = 1) +
+  geom_smooth(method = "loess", se = TRUE, color = "black", linewidth = 0.7) +
+  scale_color_manual(values = lead_colors, name = "Lead") +
+  labs(title = "Error vs. observed temperature",
+       x = "Observed 7DADM (°C)", y = "Forecast − observed (°C)") +
+  theme_minimal()
+
+print(p_box); print(p_warm)
+```
+
+## Skill against persistence, by lead
+
+```{r skill-plot, fig.height=4.5}
+bind_rows(
+  forecast_eval |> transmute(lead = as.integer(as.character(lead_days)),
+                             err = dadm_error, model = "RF (change-from-today)"),
+  forecast_eval |> transmute(lead = as.integer(as.character(lead_days)),
+                             err = dadm_m0 - actual_7dadm_C, model = "persistence (dadm_m0)")
+) |>
+  group_by(model, lead) |>
+  summarise(rmse = sqrt(mean(err^2)), .groups = "drop") |>
+  ggplot(aes(x = lead, y = rmse, color = model)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.2) +
+  scale_color_manual(values = c("RF (change-from-today)" = "#185FA5",
+                                "persistence (dadm_m0)" = "#888780"), name = NULL) +
+  scale_x_continuous(breaks = lead_days_vec) +
+  labs(title = "Forecast skill vs. persistence — real 2026 hindcast",
+       subtitle = "The gap is the value the model adds over carrying today's value forward",
+       x = "Lead (days)", y = "RMSE (°C)") +
+  theme_minimal()
+```
+
+# Threshold-exceedance performance
+
+Beyond raw temperature error, what matters operationally is whether the
+forecast correctly flags days that cross the HCP action threshold
+(7DADM >= `r threshold_7dadm`°C). Each forecast/observation pair falls into
+one of four outcomes:
+
+- **True positive (TP)**: forecast predicted exceedance, and it actually happened.
+- **True negative (TN)**: forecast predicted no exceedance, and none happened.
+- **False positive (FP)**: forecast predicted exceedance, but it didn't happen (a false alarm).
+- **False negative (FN)**: forecast predicted no exceedance, but one happened (a missed exceedance).
+
+- **Accuracy** = (TP + TN) / n — the share of all forecasts that got the exceed/no-exceed call right, in either direction.
+- **Sensitivity** (recall) = TP / (TP + FN) — of the days that actually exceeded, the fraction the model caught. Low sensitivity means missed exceedances, the operationally riskier failure mode.
+- **Specificity** = TN / (TN + FP) — of the days that did *not* exceed, the fraction correctly left unflagged. Low specificity means false alarms.
+- **Precision** = TP / (TP + FP) — of the days the model flagged, the fraction that actually exceeded.
+
+```{r hindcast-exceedance}
+exceedance_eval <- forecast_eval |>
+  mutate(actual_exceed = actual_7dadm_C >= threshold_7dadm,
+         pred_exceed   = pred_7dadm_C   >= threshold_7dadm)
+
+confusion_summary <- function(df, pred_col, actual_col) {
+  df <- df |> filter(!is.na({{ pred_col }}), !is.na({{ actual_col }}))
+  pred <- df |> pull({{ pred_col }}); actual <- df |> pull({{ actual_col }})
+  tp <- sum(pred & actual); tn <- sum(!pred & !actual)
+  fp <- sum(pred & !actual); fn <- sum(!pred & actual)
+  tibble(n = nrow(df), accuracy = (tp + tn) / nrow(df),
+         sensitivity = if (tp + fn > 0) tp / (tp + fn) else NA_real_,
+         specificity = if (tn + fp > 0) tn / (tn + fp) else NA_real_,
+         precision   = if (tp + fp > 0) tp / (tp + fp) else NA_real_)
+}
+
+exceedance_eval |>
+  group_by(lead_days) |>
+  group_modify(~ confusion_summary(.x, pred_exceed, actual_exceed)) |>
+  ungroup() |>
+  kable(digits = 2,
+        col.names = c("Lead (days)", "n", "Accuracy", "Sensitivity", "Specificity", "Precision"))
+```
+
+Where the calls land in time matters as much as the rates. Misses
+clustering on particular days points at a shared cause rather than random
+error — and they do cluster, hard.
+
+The weather panel underneath shares the same date axis, so the driver and
+the response line up directly. It plots the NWS max-air-temperature
+forecast at two horizons: `lead_days == 0` (issued the same day, the
+closest thing in this log to an observation) and `lead_days == 7`. The
+vertical dashed lines mark the days the observed 7DADM first crossed the
+threshold from below — read down from a miss cluster to see what the air
+temperature was doing, and how far ahead the week-out forecast saw it.
+
+```{r exceedance-timeline, fig.height=8}
+# Days the OBSERVED series first crossed the threshold from below. Reused
+# by the miss-anatomy tables below.
+crossings <- rm_8_5_wide |>
+  arrange(date) |>
+  filter(!is.na(actual_7dadm_C)) |>
+  mutate(above = actual_7dadm_C >= threshold_7dadm,
+         crossing = above & !lag(above)) |>
+  filter(crossing) |>
+  select(crossing_date = date, obs_7dadm = actual_7dadm_C)
+
+date_rng <- range(exceedance_eval$forecast_date)
+
+p_heat <- exceedance_eval |>
+  mutate(outcome = case_when(
+    pred_exceed &  actual_exceed ~ "hit (TP)",
+    !pred_exceed & !actual_exceed ~ "correct no-flag (TN)",
+    pred_exceed & !actual_exceed ~ "false alarm (FP)",
+    TRUE ~ "MISSED exceedance (FN)")) |>
+  ggplot(aes(x = forecast_date, y = fct_rev(lead_days), fill = outcome)) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  geom_vline(data = crossings, aes(xintercept = crossing_date),
+             linetype = "dashed", color = "#333333", linewidth = 0.4) +
+  scale_fill_manual(values = c("hit (TP)" = "#4E9F50",
+                               "correct no-flag (TN)" = "#DDDDDD",
+                               "false alarm (FP)" = "#F2C14E",
+                               "MISSED exceedance (FN)" = "#C93312"), name = NULL) +
+  scale_x_date(limits = date_rng, expand = expansion(mult = 0.01)) +
+  labs(title = "Exceedance call by day and lead, against the air temperature that drove it",
+       subtitle = "Dashed lines = days the observed 7DADM first crossed the threshold from below",
+       x = NULL, y = "Lead (days)") +
+  theme_minimal() +
+  theme(legend.position = "top", axis.text.x = element_blank())
+
+air_panel <- nws_cached |>
+  filter(variable == "maxTemperature", lead_days %in% c(0, 7)) |>
+  group_by(forecast_date, lead_days) |>
+  summarise(air_max = max(value, na.rm = TRUE), .groups = "drop") |>
+  filter(forecast_date >= date_rng[1], forecast_date <= date_rng[2]) |>
+  mutate(series = if_else(lead_days == 0,
+                          "same-day forecast (≈ observed)", "7-day-ahead forecast"))
+
+p_air <- ggplot(air_panel, aes(x = forecast_date, y = air_max, color = series)) +
+  geom_vline(data = crossings, aes(xintercept = crossing_date),
+             linetype = "dashed", color = "#333333", linewidth = 0.4) +
+  geom_line(linewidth = 0.7) +
+  scale_color_manual(values = c("same-day forecast (≈ observed)" = "black",
+                                "7-day-ahead forecast" = "#C93312"), name = NULL) +
+  scale_x_date(limits = date_rng, expand = expansion(mult = 0.01)) +
+  labs(x = NULL, y = "Max air temp (°C)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+plot_grid(p_heat, p_air, ncol = 1, align = "v", axis = "lr", rel_heights = c(2.2, 1))
+```
+
+### What the misses actually are
+
+Almost every missed exceedance falls on one of a handful of dates, and
+those dates turn out to be the same thing each time.
+
+```{r miss-anatomy}
+miss_dates <- exceedance_eval |>
+  filter(!pred_exceed, actual_exceed) |>
+  count(forecast_date, name = "leads_missed") |>
+  arrange(desc(leads_missed))
+
+# `crossings` is defined with the heatmap above.
+miss_dates |>
+  mutate(`is a first crossing?` = if_else(forecast_date %in% crossings$crossing_date, "yes", "no")) |>
+  kable(digits = 2, col.names = c("Forecast date", "Leads missed", "Is a first crossing?"))
+```
+
+```{r miss-character}
+fn <- exceedance_eval |> filter(!pred_exceed, actual_exceed) |>
+  mutate(required_change = actual_7dadm_C - dadm_m0,
+         predicted_change = pred_7dadm_C - dadm_m0)
+
+tibble(
+  metric = c("Missed exceedances (rows)",
+             "…that are marginal (observed < 20.5°C)",
+             "Median observed on missed days (°C)",
+             "Median forecast on missed days (°C)",
+             "Median rise actually required (°C)",
+             "Median rise the model predicted (°C)",
+             "Median shortfall (°C)",
+             "Median required rise, ALL days (°C)"),
+  value = c(nrow(fn),
+            sum(fn$actual_7dadm_C < 20.5),
+            median(fn$actual_7dadm_C),
+            median(fn$pred_7dadm_C),
+            median(fn$required_change),
+            median(fn$predicted_change),
+            median(fn$required_change - fn$predicted_change),
+            median(exceedance_eval$actual_7dadm_C - exceedance_eval$dadm_m0))
+) |> kable(digits = 2)
+```
+
+**The model does not miss warm days — it misses the transition into
+warm.** Over the whole season the observed 7DADM crossed the threshold
+from below exactly `r nrow(crossings)` times
+(`r paste(format(crossings$crossing_date, "%b %d"), collapse = ", ")`),
+and every one of them is a miss cluster. Once the site is established
+above 20°C the model tracks it correctly for weeks — that is the
+uninterrupted green on the right of the heatmap.
+
+Three things follow from the numbers above:
+
+* **The misses are marginal, not wild.** 85% of them are days that
+  observed under 20.5°C, median 20.11°C, with the forecast sitting about
+  0.6°C short. These are near-misses on the threshold, not failures of
+  the temperature forecast.
+* **They are rapid-rise days, and the model under-shoots the rise.** A
+  missed day required a jump of roughly +1.8°C from the run date, against
+  a median of about 0.0°C across all days. The model does lean into the
+  rise — it predicts around +1.0°C — but under-shoots by about 1°C, which
+  is exactly enough to leave a marginal crossing on the wrong side of the
+  line. This is the conservative side of anchoring on `dadm_m0`: when
+  today is the best guide, a sharp departure from today is what gets
+  damped.
+* **The weather forecast is not to blame.** NWS air-max forecast error on
+  missed days (bias −0.13°C, MAE 1.66°C, measured against observed 2026
+  air temperature) is indistinguishable from correctly-called days
+  (bias −0.06 to +0.10°C, MAE 1.30–1.73°C). The model received good
+  weather information and under-translated it into a water-temperature
+  rise.
+
+The false alarms have the opposite cause: on those rows the NWS air-max
+forecast ran **+2.5°C too warm** (MAE 3.45°C), roughly double the error of
+any other outcome. So the two failure modes are separable — misses are a
+model limitation on transitions, false alarms are an input limitation —
+and they warrant different responses. Nothing is gained by tuning one
+threshold to trade between them.
+
+The practical hedge, given that all of this concentrates on three or four
+predictable days a season: treat a forecast in the high 19s during a
+rising trend as a soft exceedance warning rather than a clean negative.
+`rm85-rf-delta-quantiles.Rmd` does this properly — it puts a probability
+on the crossing instead of a binary call, which is precisely the case
+these misses represent.
+
+```{r exceedance-rates-plot, fig.height=4.5}
+exceedance_eval |>
+  group_by(lead_days) |>
+  group_modify(~ confusion_summary(.x, pred_exceed, actual_exceed)) |>
+  ungroup() |>
+  select(lead_days, Sensitivity = sensitivity, Specificity = specificity,
+         Precision = precision, Accuracy = accuracy) |>
+  pivot_longer(-lead_days, names_to = "metric", values_to = "value") |>
+  ggplot(aes(x = as.integer(as.character(lead_days)), y = value, color = metric)) +
+  geom_line(linewidth = 0.9) + geom_point(size = 2) +
+  scale_x_continuous(breaks = lead_days_vec) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(title = "Threshold-exceedance performance by lead",
+       x = "Lead (days)", y = NULL, color = NULL) +
+  theme_minimal()
+```
+
+# Potential improvements
+
+Ordered by expected value for the operational decision this feeds — a
+7-day-ahead exceedance call that can result in irrigators being asked to
+shut off water. Each entry says what it would fix and why that matters
+here, so the list can be triaged rather than worked through in order.
+
+**1. Retrain including 2026 once the season closes.** 20% of 2026 days
+exceeded the training-set maximum 7DADM (24.89°C observed vs 24.06°C in
+training). A random forest cannot predict beyond the range of values in
+its leaves, so every one of those days forced the model to extrapolate.
+2026 is the warmest year in the 15-year record and therefore the single
+most valuable season available for extending that range. This is cheap
+and does more than any feature change tested so far.
+
+**2. Use the exceedance probability, not the binary flag, as the decision
+object.** `rm85-rf-delta-quantiles.Rmd` already produces P(7DADM ≥
+threshold). On the 27 rows this document's point model missed, that
+probability had a median of **0.32** — it was signalling real risk on
+days the point forecast rounded to "no". An alert at P ≥ 0.2 would have
+caught 70% of them. The decision threshold then follows from the cost
+ratio (p\* = C_false-alarm / (C_false-alarm + C_missed)) rather than
+being fixed implicitly at the model's 50/50 point, which is the honest
+way to encode "a missed exceedance is worse than an unnecessary
+shutoff".
+
+**3. Propagate weather-forecast uncertainty with a GEFS ensemble.** The
+quantile model captures the spread of *water* temperature given the
+weather forecast it was handed; it does not represent error in that
+forecast. Yet the diagnosis above shows false alarms are driven almost
+entirely by the NWS air-max forecast running about +2.5°C too warm
+(MAE 3.45°C, roughly double any other outcome). At a 7-day lead the
+weather forecast is the dominant error source, so running the model once
+per GEFS ensemble member and taking the spread would address the largest
+remaining uncertainty rather than a residual one.
+
+**4. Conformalize the prediction intervals.** The interval calibration in
+the quantile document — sweeping the nominal level until empirical
+coverage hits 80% — is an ad-hoc version of split conformal prediction.
+Conformalized Quantile Regression does it properly and carries a
+finite-sample coverage guarantee under exchangeability, while keeping the
+lead-dependent adaptivity. Modest work; strictly firmer footing for
+intervals that inform consequential decisions.
+
+**5. Build the predictive distribution from the operational log itself.**
+`output/nws-forecasts-log.csv` has been accumulating real forecasts since
+May 2026. Once there are two or three seasons, the distribution of
+*realized* forecast errors at each lead is the ideal uncertainty
+estimate: it automatically includes model error, weather-input error, and
+regime drift, none of which a model trained on a historical archive can
+fully see. This is the long-run destination — it needs only patience and
+protecting that log, which is unreproducible if lost.
+
+**6. Monitor running bias rather than assuming stability.** The Camp
+Polk-to-RM 8.5 relationship shifted around 2022 and has held at the new
+level since; a record season is exactly when the next shift would appear.
+A trailing 30-day bias check against observations, with an alert
+threshold, would catch drift before it became a season-long problem.
+
+Two things deliberately **not** on this list, having been tested and
+rejected: switching the weather training source (Open-Meteo Previous Runs
+vs dynamical.org made no significant difference, p = 0.46), and adding
+seasonal-anomaly features (significantly worse — in a record year the
+anomaly itself falls outside the training range, so the forest saturates
+on it and dilutes the predictors that work).
+
+# Saved artifacts
+
+```{r save-models}
+walk(lead_days_vec, function(k) {
+  saveRDS(models_rf_delta[[as.character(k)]],
+          here("output", paste0("rm85_rf_7dadm_delta_lead", k, ".rds")))
+})
+cat("Models saved to output/rm85_rf_7dadm_delta_lead*.rds\n")
+```
+
+**These models return a change, not a temperature.** Any consumer must add
+`dadm_m0` (RM 8.5's observed 7DADM on the run date) back:
+
+```r
+pred_7dadm <- predict(model, newdata) + newdata$dadm_m0
+```
+
+`analysis/summer_2026_8_5_performance.Rmd` does this via the same
+`predict_rf_delta()` helper defined above.

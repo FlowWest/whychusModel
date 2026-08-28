@@ -1,0 +1,612 @@
+---
+title: "RM 8.5 7DADM — Prediction Intervals and Exceedance Probability"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(zoo)
+library(here)
+library(whychusModel)
+library(randomForest)
+library(ranger)
+```
+
+# Objective
+
+`rm85-rf-delta.Rmd` produces a single number per lead day. That is the
+right point forecast — it is unchanged and still the production model —
+but it says nothing about how confident it is, and confidence is exactly
+what a season like 2026 strains. 2026 is the warmest year in the 15-year
+record: mean 7DADM +2.96°C above the 2011-2025 average, 47% of days at or
+above the HCP threshold against a historical median of 24%, and 20% of
+days above anything in the model's training range.
+
+This document adds a **quantile regression forest** alongside the existing
+point model, on the same change-from-today target and the same features.
+Rather than a conditional mean it estimates the whole conditional
+distribution, which gives two things the point forecast cannot:
+
+* a **prediction interval** — "22.5, 80% likely between 21.8 and 23.3" —
+  so a near-threshold forecast can be read as near-threshold rather than
+  as a hard call;
+* an **exceedance probability** — P(7DADM ≥ 20°C) — which replaces the
+  binary flag with a graded risk that can be thresholded to whatever
+  balance of missed exceedances and false alarms the HCP response
+  actually warrants.
+
+The point forecast is deliberately left alone. This document compares the
+quantile forest's median against the saved point model and recommends
+which to use for the headline number, but it does not replace
+`rm85_rf_7dadm_delta_lead*.rds`.
+
+**One methodological trap worth naming:** a quantile forest's in-sample
+interval coverage is ~100%, because each training row lands in its own
+leaf. Coverage is therefore only ever evaluated below on held-out data —
+the chronological test split and the real 2026 hindcast — never in-sample.
+
+```{r config}
+month_start     <- 5
+month_end       <- 10
+lead_days_vec   <- c(1:7)
+ntree           <- 500
+test_frac       <- 0.20
+trend_window    <- 5
+threshold_7dadm <- 20.0
+
+# Nominal central interval. 80% is the operational default here: wide
+# enough to be honest at long leads, narrow enough to be actionable.
+interval_lo <- 0.10
+interval_hi <- 0.90
+
+# Fine grid used to invert the conditional distribution into an exceedance
+# probability; also supplies the median and interval bounds.
+q_grid <- seq(0.01, 0.99, by = 0.01)
+
+rm85_logger_file <- "WC85 Rimrock bottom 2026-08-13 09_52_44 PDT.xlsx"
+
+lead_colors <- setNames(colorRampPalette(c("#185FA5", "#4E9F50", "#C93312"))(length(lead_days_vec)),
+                        as.character(lead_days_vec))
+```
+
+# Data & feature construction
+
+Identical to `rm85-rf-delta.Rmd` — same dynamical.org weather source, same
+run-date-relative joins, same trajectory summaries and RM 8.5 trend
+features.
+
+```{r load-data}
+rm85_7dadm <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |> filter(statistic == "7DADM") |>
+  select(date, rm_8_5_7dadm = temperature)
+
+rm85_tmax <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |> filter(statistic == "max") |>
+  select(date, rm_8_5_tmax = temperature)
+
+cp_7dadm <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |> filter(statistic == "7DADM") |>
+  select(date, cp_7dadm = temperature)
+
+cp_tmax <- camp_polk_temperature_historical |>
+  mutate(date = as.Date(date)) |> filter(statistic == "max") |>
+  select(date, cp_tmax = temperature)
+
+cp_flow <- camp_polk_flow_historical |>
+  mutate(date = as.Date(date)) |> filter(statistic == "mean") |>
+  select(date, cp_flow_mean = flow_cfs)
+
+dyn_raw <- read_csv(here("data-raw", "dynamical_gfs_air_temp_historical.csv")) |>
+  mutate(valid_date = as.Date(valid_date))
+```
+
+```{r helpers}
+get_forecast_dyn <- function(lead_k) {
+  dyn_raw |> filter(lead_days == lead_k) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date, air_max = temperature_2m_max,
+           air_min = temperature_2m_min, cloud_pct = cloud_cover_mean)
+}
+
+get_forecast_trajectory_dyn <- function(lead_k) {
+  reduce(map(seq_len(lead_k), function(k) {
+    get_forecast_dyn(k) |> mutate(run_date = date - k) |>
+      transmute(run_date,
+        !!paste0("air_max_d", k) := air_max,
+        !!paste0("air_min_d", k) := air_min,
+        !!paste0("cloud_d",   k) := cloud_pct,
+        !!paste0("julian_d",  k) := yday(date))
+  }), full_join, by = "run_date") |> arrange(run_date)
+}
+
+add_trajectory_summaries <- function(df, lead_k) {
+  air_max_cols <- as.matrix(df[, paste0("air_max_d", 1:lead_k), drop = FALSE])
+  air_min_cols <- as.matrix(df[, paste0("air_min_d", 1:lead_k), drop = FALSE])
+  df$traj_air_max_max  <- apply(air_max_cols, 1, max)
+  df$traj_air_max_mean <- apply(air_max_cols, 1, mean)
+  df$traj_air_min_mean <- apply(air_min_cols, 1, mean)
+  df$traj_warming      <- air_max_cols[, lead_k] - air_max_cols[, 1]
+  df
+}
+
+build_df_dyn <- function(lead_k) {
+  fcst_traj <- get_forecast_trajectory_dyn(lead_k) |>
+    mutate(date = run_date + lead_k) |> select(-run_date)
+
+  joined <- rm85_7dadm |>
+    left_join(cp_flow  |> mutate(date = date + lead_k), by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k), by = "date") |>
+    left_join(cp_tmax  |> mutate(date = date + lead_k), by = "date") |>
+    left_join(fcst_traj, by = "date") |>
+    left_join(cp_flow  |> mutate(date = date + lead_k + 1)            |> rename(cp_flow_m1  = cp_flow_mean), by = "date") |>
+    left_join(cp_flow  |> mutate(date = date + lead_k + trend_window) |> rename(cp_flow_mw  = cp_flow_mean), by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k + 1)            |> rename(cp_7dadm_m1 = cp_7dadm),     by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(cp_7dadm_mw = cp_7dadm),     by = "date") |>
+    left_join(rm85_7dadm |> mutate(date = date + lead_k)                |> rename(dadm_m0 = rm_8_5_7dadm), by = "date") |>
+    left_join(rm85_tmax  |> mutate(date = date + lead_k)                |> rename(tmax_m0 = rm_8_5_tmax),  by = "date") |>
+    left_join(rm85_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(dadm_mw = rm_8_5_7dadm), by = "date") |>
+    left_join(rm85_tmax  |> mutate(date = date + lead_k + trend_window) |> rename(tmax_mw = rm_8_5_tmax),  by = "date") |>
+    mutate(
+      cp_flow_trend  = (cp_flow_m1  - cp_flow_mw)  / (trend_window - 1),
+      cp_7dadm_trend = (cp_7dadm_m1 - cp_7dadm_mw) / (trend_window - 1),
+      dadm_trend     = (dadm_m0 - dadm_mw) / trend_window,
+      tmax_trend     = (tmax_m0 - tmax_mw) / trend_window,
+      month = month(date)
+    ) |>
+    filter(month >= month_start, month <= month_end) |>
+    drop_na() |> distinct(date, .keep_all = TRUE) |> arrange(date)
+
+  add_trajectory_summaries(joined, lead_k)
+}
+
+get_model_features <- function(lead_k) {
+  c("cp_flow_mean", "cp_7dadm", "cp_tmax", "cp_flow_trend", "cp_7dadm_trend",
+    paste0("air_max_d", 1:lead_k), paste0("air_min_d", 1:lead_k),
+    paste0("cloud_d", 1:lead_k), paste0("julian_d", 1:lead_k),
+    "dadm_m0", "tmax_m0", "dadm_trend", "tmax_trend",
+    "traj_air_max_max", "traj_air_max_mean", "traj_air_min_mean", "traj_warming")
+}
+
+split_chronological <- function(df, p = test_frac) {
+  df <- df |> arrange(date); n <- nrow(df); n_test <- floor(n * p)
+  list(train = df[seq_len(n - n_test), ], test = df[seq(n - n_test + 1, n), ])
+}
+
+# Quantile regression forest on the same change-from-today target. Because
+# adding dadm_m0 is a monotone shift, quantiles of the change map directly
+# onto quantiles of the 7DADM — no re-derivation needed.
+fit_qrf_delta <- function(train_df, features, seed = 42) {
+  d <- train_df[, features, drop = FALSE]
+  d$delta_7dadm <- train_df$rm_8_5_7dadm - train_df$dadm_m0
+  ranger(delta_7dadm ~ ., data = d, num.trees = ntree,
+         mtry = max(1, floor(length(features) / 3)),
+         quantreg = TRUE, seed = seed)
+}
+
+# Returns the full quantile grid in 7DADM space (dadm_m0 added back).
+predict_quantiles <- function(model, newdata, quantiles = q_grid) {
+  q <- predict(model, newdata, type = "quantiles", quantiles = quantiles)$predictions
+  sweep(q, 1, newdata$dadm_m0, "+")
+}
+
+# P(7DADM >= threshold), read off the predicted quantile grid: the share of
+# the conditional distribution sitting above the threshold.
+exceedance_prob <- function(qmat, threshold = threshold_7dadm) {
+  rowMeans(qmat >= threshold)
+}
+
+rmse <- function(pred, obs) sqrt(mean((pred - obs)^2))
+```
+
+# Fit the quantile forests
+
+```{r fit-models}
+dyn_dfs <- map(lead_days_vec, build_df_dyn)
+names(dyn_dfs) <- as.character(lead_days_vec)
+
+dyn_splits <- map(lead_days_vec, function(k) split_chronological(dyn_dfs[[as.character(k)]]))
+names(dyn_splits) <- as.character(lead_days_vec)
+
+models_qrf <- map(lead_days_vec, function(k) {
+  fit_qrf_delta(dyn_splits[[as.character(k)]]$train, get_model_features(k))
+})
+names(models_qrf) <- as.character(lead_days_vec)
+
+cat("Fitted quantile forests for leads:", paste(lead_days_vec, collapse = ", "), "\n")
+```
+
+# Test-period interval performance
+
+Held-out chronological split. **Coverage** is the fraction of observations
+that actually fell inside the nominal 80% interval — it should land near
+0.80. Materially above means the intervals are too wide to be useful;
+materially below means they are overconfident.
+
+```{r test-period-coverage}
+test_q <- map_dfr(lead_days_vec, function(k) {
+  te <- dyn_splits[[as.character(k)]]$test
+  qm <- predict_quantiles(models_qrf[[as.character(k)]], te)
+  tibble(
+    lead = k, date = te$date, obs = te$rm_8_5_7dadm,
+    median = qm[, which.min(abs(q_grid - 0.50))],
+    lo     = qm[, which.min(abs(q_grid - interval_lo))],
+    hi     = qm[, which.min(abs(q_grid - interval_hi))]
+  )
+})
+
+test_q |>
+  group_by(lead) |>
+  summarise(n = n(),
+            coverage_80 = mean(obs >= lo & obs <= hi),
+            mean_width  = mean(hi - lo),
+            median_rmse = rmse(median, obs), .groups = "drop") |>
+  kable(digits = 3,
+        col.names = c("Lead (days)", "n", "80% coverage", "Mean width (°C)", "Median RMSE"))
+```
+
+# Real 2026 hindcast
+
+The operationally honest test: real NWS forecasts as inputs, and the
+warmest season on record as the target.
+
+```{r hindcast-load-data}
+nws_cached <- read_csv(here("output", "nws-forecasts-log.csv")) |>
+  mutate(run_date = as.Date(run_date), forecast_date = as.Date(forecast_date))
+
+rm_8_5_new <- readxl::read_xlsx(here("data-raw", "data-raw", rm85_logger_file)) |>
+  janitor::clean_names()
+
+rm_8_5 <- rm_8_5_new |>
+  mutate(date = as.Date(lubridate::floor_date(date_time_pdt, "1 day"))) |>
+  group_by(date) |>
+  summarize(max = max(temperature_c, na.rm = TRUE), .groups = "drop") |>
+  mutate(`7DADM` = zoo::rollapply(max, width = 7, FUN = mean, fill = NA, align = "right"))
+
+rm_8_5_wide <- rm_8_5 |> select(date, actual_7dadm_C = `7DADM`, actual_tmax_C = max)
+
+hindcast_run_dates <- nws_cached |>
+  distinct(run_date) |> filter(run_date %in% rm_8_5_wide$date) |>
+  pull(run_date) |> sort()
+
+pull_start <- min(hindcast_run_dates) - 10
+pull_end   <- max(hindcast_run_dates)
+
+cp_flow_hc <- get_owrd_hydro("14076100", pull_start, pull_end, "MDF") |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  rename(cp_flow_mean = mean_daily_flow_cfs) |> select(date, cp_flow_mean) |> arrange(date)
+
+cp_tmax_hc <- get_owrd_hydro("14076100", pull_start, pull_end, "WTEMP15") |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  group_by(date) |>
+  summarise(cp_tmax = max(instantaneous_water_temp_c, na.rm = TRUE), .groups = "drop") |> arrange(date)
+
+cp_7dadm_hc <- cp_tmax_hc |> mutate(cp_7dadm = zoo::rollmean(cp_tmax, k = 7, fill = NA, align = "right"))
+
+cp_daily <- cp_flow_hc |> left_join(cp_tmax_hc, by = "date") |>
+  left_join(select(cp_7dadm_hc, date, cp_7dadm), by = "date")
+```
+
+```{r hindcast-build-inputs}
+safe1 <- function(x) if (length(x) == 0) NA_real_ else x
+
+nws_daily <- function(var, target_date, agg_fn, run_date_val) {
+  vals <- nws_cached |>
+    filter(run_date == run_date_val, variable == var, forecast_date == target_date) |> pull(value)
+  if (length(vals) == 0) return(NA_real_)
+  agg_fn(vals, na.rm = TRUE)
+}
+
+build_hindcast_row <- function(run_date_val, k) {
+  cp_today    <- cp_daily    |> filter(date == run_date_val)
+  cp_yest     <- cp_daily    |> filter(date == run_date_val - 1)
+  cp_trendw   <- cp_daily    |> filter(date == run_date_val - trend_window)
+  rm85_today  <- rm_8_5_wide |> filter(date == run_date_val)
+  rm85_trendw <- rm_8_5_wide |> filter(date == run_date_val - trend_window)
+
+  traj <- map(1:k, function(d) {
+    tibble(
+      !!paste0("air_max_d", d) := nws_daily("maxTemperature", run_date_val + d, max,  run_date_val),
+      !!paste0("air_min_d", d) := nws_daily("minTemperature", run_date_val + d, min,  run_date_val),
+      !!paste0("cloud_d",   d) := nws_daily("skyCover",       run_date_val + d, mean, run_date_val),
+      !!paste0("julian_d",  d) := yday(run_date_val + d)
+    )
+  }) |> bind_cols()
+
+  bind_cols(
+    tibble(run_date = run_date_val, forecast_date = run_date_val + k, lead_days = k,
+      cp_flow_mean   = safe1(cp_today$cp_flow_mean),
+      cp_7dadm       = safe1(cp_today$cp_7dadm),
+      cp_tmax        = safe1(cp_today$cp_tmax),
+      cp_flow_trend  = (safe1(cp_yest$cp_flow_mean) - safe1(cp_trendw$cp_flow_mean)) / (trend_window - 1),
+      cp_7dadm_trend = (safe1(cp_yest$cp_7dadm)     - safe1(cp_trendw$cp_7dadm))     / (trend_window - 1)),
+    traj,
+    tibble(dadm_m0 = safe1(rm85_today$actual_7dadm_C),
+           tmax_m0 = safe1(rm85_today$actual_tmax_C),
+           dadm_trend = (safe1(rm85_today$actual_7dadm_C) - safe1(rm85_trendw$actual_7dadm_C)) / trend_window,
+           tmax_trend = (safe1(rm85_today$actual_tmax_C)  - safe1(rm85_trendw$actual_tmax_C))  / trend_window)
+  )
+}
+
+hindcast_grid   <- expand_grid(run_date = hindcast_run_dates, lead_days = lead_days_vec)
+hindcast_inputs <- map2_dfr(hindcast_grid$run_date, hindcast_grid$lead_days, build_hindcast_row)
+
+hindcast_by_lead <- map(lead_days_vec, function(k) {
+  add_trajectory_summaries(hindcast_inputs |> filter(lead_days == k), k)
+})
+names(hindcast_by_lead) <- as.character(lead_days_vec)
+```
+
+```{r hindcast-predict}
+hindcast_q <- map_dfr(lead_days_vec, function(k) {
+  rows <- hindcast_by_lead[[as.character(k)]]
+  features <- get_model_features(k)
+  ok <- complete.cases(rows[, c(features, "dadm_m0"), drop = FALSE])
+  if (!any(ok)) return(NULL)
+  rows <- rows[ok, , drop = FALSE]
+
+  qm <- predict_quantiles(models_qrf[[as.character(k)]], rows)
+
+  # The existing point model, for a like-for-like comparison of the
+  # headline number. Loaded, never modified.
+  point_model <- readRDS(here("output", paste0("rm85_rf_7dadm_delta_lead", k, ".rds")))
+  point_pred  <- predict(point_model, rows) + rows$dadm_m0
+
+  tibble(
+    run_date = rows$run_date, forecast_date = rows$forecast_date, lead_days = k,
+    dadm_m0  = rows$dadm_m0,
+    point_rf = point_pred,
+    median   = qm[, which.min(abs(q_grid - 0.50))],
+    lo       = qm[, which.min(abs(q_grid - interval_lo))],
+    hi       = qm[, which.min(abs(q_grid - interval_hi))],
+    p_exceed = exceedance_prob(qm)
+  )
+}) |>
+  inner_join(rm_8_5_wide, by = c("forecast_date" = "date")) |>
+  filter(!is.na(actual_7dadm_C))
+
+cat(sprintf("Forecast/observation pairs available for evaluation: %d\n", nrow(hindcast_q)))
+```
+
+## Interval coverage and width
+
+```{r hindcast-coverage}
+hindcast_q |>
+  group_by(lead_days) |>
+  summarise(n = n(),
+            coverage_80 = mean(actual_7dadm_C >= lo & actual_7dadm_C <= hi),
+            mean_width  = mean(hi - lo), .groups = "drop") |>
+  kable(digits = 3, col.names = c("Lead (days)", "n", "80% coverage", "Mean width (°C)"))
+```
+
+## Interval calibration
+
+The nominal 80% interval above is **conservative** — it covers the
+observation more often than 80% of the time, at both the test period and
+the hindcast. That is a known tendency of quantile regression forests
+(leaf-level empirical distributions are wider than the true conditional
+distribution when leaves are small), and it matters operationally: an
+interval that is honest about being 95% when it claims 80% is simply wider
+than it needs to be, which makes near-threshold days look less decidable
+than they are.
+
+The fix is empirical: sweep the nominal level and pick the one that
+actually delivers 80% coverage. Critically, that choice is made on the
+**test period** and then validated on the **2026 hindcast** — calibrating
+and evaluating on the same rows would just be fitting the calibration to
+its own scoreboard.
+
+```{r interval-calibration}
+nominal_levels <- seq(0.40, 0.95, by = 0.05)
+
+level_indices <- function(L) {
+  c(lo = which.min(abs(q_grid - (1 - L) / 2)),
+    hi = which.min(abs(q_grid - (1 - (1 - L) / 2))))
+}
+
+# --- Step 1: sweep coverage on the TEST PERIOD (calibration set) ---
+coverage_sweep_test <- map_dfr(lead_days_vec, function(k) {
+  te <- dyn_splits[[as.character(k)]]$test
+  qm <- predict_quantiles(models_qrf[[as.character(k)]], te)
+  obs <- te$rm_8_5_7dadm
+  map_dfr(nominal_levels, function(L) {
+    idx <- level_indices(L)
+    tibble(lead_days = k, nominal = L,
+           empirical_coverage = mean(obs >= qm[, idx["lo"]] & obs <= qm[, idx["hi"]]),
+           mean_width = mean(qm[, idx["hi"]] - qm[, idx["lo"]]))
+  })
+})
+
+coverage_sweep_test |>
+  select(lead_days, nominal, empirical_coverage) |>
+  pivot_wider(names_from = lead_days, values_from = empirical_coverage, names_prefix = "L") |>
+  kable(digits = 3,
+        caption = "Test-period empirical coverage by nominal level and lead (target: 0.80)")
+```
+
+```{r calibrated-levels}
+calibrated <- coverage_sweep_test |>
+  group_by(lead_days) |>
+  slice_min(abs(empirical_coverage - 0.80), n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(lead_days, calibrated_nominal = nominal,
+         test_coverage = empirical_coverage)
+
+# --- Step 2: apply those levels to the 2026 hindcast (validation set) ---
+calibration_check <- map_dfr(lead_days_vec, function(k) {
+  rows <- hindcast_by_lead[[as.character(k)]]
+  features <- get_model_features(k)
+  ok <- complete.cases(rows[, c(features, "dadm_m0"), drop = FALSE])
+  rows <- rows[ok, , drop = FALSE]
+  qm <- predict_quantiles(models_qrf[[as.character(k)]], rows)
+
+  obs <- rows |> select(forecast_date) |>
+    left_join(rm_8_5_wide, by = c("forecast_date" = "date")) |> pull(actual_7dadm_C)
+  keep <- !is.na(obs); qm <- qm[keep, , drop = FALSE]; obs <- obs[keep]
+
+  L    <- calibrated$calibrated_nominal[calibrated$lead_days == k]
+  idx  <- level_indices(L)
+  idx8 <- level_indices(0.80)
+
+  tibble(lead_days = k, calibrated_nominal = L,
+         hindcast_coverage = mean(obs >= qm[, idx["lo"]] & obs <= qm[, idx["hi"]]),
+         calibrated_width  = mean(qm[, idx["hi"]] - qm[, idx["lo"]]),
+         nominal80_width   = mean(qm[, idx8["hi"]] - qm[, idx8["lo"]]))
+})
+
+calibrated |>
+  left_join(calibration_check, by = c("lead_days", "calibrated_nominal")) |>
+  mutate(width_saved = nominal80_width - calibrated_width) |>
+  kable(digits = 3,
+        col.names = c("Lead (days)", "Calibrated level", "Test coverage",
+                      "2026 coverage (validation)", "Calibrated width (°C)",
+                      "Nominal-80% width (°C)", "Width saved (°C)"))
+```
+
+The calibrated level is chosen on the test period; the "2026 coverage"
+column is the out-of-sample check that it still lands near 0.80 on a year
+the calibration never saw. The saved models are unchanged — this is purely
+a post-processing choice about which quantiles to read off them.
+
+## Point forecast: quantile median vs. the existing model
+
+The saved point model stays in production unless the median clearly beats
+it here.
+
+```{r hindcast-point-comparison}
+hindcast_q |>
+  group_by(lead_days) |>
+  summarise(
+    n = n(),
+    `RF point bias`  = mean(point_rf - actual_7dadm_C),
+    `RF point RMSE`  = rmse(point_rf, actual_7dadm_C),
+    `QRF median bias`= mean(median - actual_7dadm_C),
+    `QRF median RMSE`= rmse(median, actual_7dadm_C),
+    .groups = "drop") |>
+  kable(digits = 3)
+```
+
+```{r hindcast-fan-plot, fig.height=8}
+hindcast_q |>
+  filter(lead_days %in% c(1, 4, 7)) |>
+  mutate(lead_label = paste("Lead", lead_days, "day(s)")) |>
+  ggplot(aes(x = forecast_date)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "#185FA5", alpha = 0.20) +
+  geom_line(aes(y = median), color = "#185FA5", linewidth = 0.7) +
+  geom_line(aes(y = actual_7dadm_C), color = "black", linewidth = 0.7) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", color = "#E24B4A") +
+  facet_wrap(~lead_label, ncol = 1) +
+  labs(title = "RM 8.5 7DADM — observed (black) vs. forecast median and 80% interval (blue)",
+       subtitle = "Dotted red line = HCP action threshold",
+       x = NULL, y = "7DADM (°C)") +
+  theme_minimal()
+```
+
+# Exceedance probability
+
+Instead of a binary flag, each forecast now carries P(7DADM ≥
+`r threshold_7dadm`°C). Two things need checking: whether those
+probabilities are **calibrated** (when the model says 70%, does it happen
+about 70% of the time?), and what they buy operationally.
+
+```{r reliability}
+reliability <- hindcast_q |>
+  mutate(bin = cut(p_exceed, breaks = seq(0, 1, 0.2), include.lowest = TRUE)) |>
+  group_by(bin) |>
+  summarise(n = n(), mean_predicted = mean(p_exceed),
+            observed_frequency = mean(actual_7dadm_C >= threshold_7dadm), .groups = "drop")
+
+reliability |>
+  kable(digits = 3,
+        col.names = c("Predicted probability bin", "n", "Mean predicted", "Observed frequency"))
+```
+
+```{r reliability-plot, fig.height=5}
+ggplot(reliability, aes(x = mean_predicted, y = observed_frequency)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#666666") +
+  geom_point(aes(size = n), color = "#185FA5") +
+  geom_line(color = "#185FA5") +
+  scale_x_continuous(limits = c(0, 1)) + scale_y_continuous(limits = c(0, 1)) +
+  labs(title = "Reliability of the exceedance probability",
+       subtitle = "Points on the dashed line are perfectly calibrated",
+       x = "Predicted P(7DADM >= threshold)", y = "Observed frequency", size = "n") +
+  theme_minimal()
+```
+
+## Choosing an alert threshold
+
+A probability lets the alert cutoff be tuned to how the response is
+weighted. Missing an exceedance and raising a false alarm are not equally
+costly, and this table makes the trade explicit rather than fixing it at
+the model's own 50/50 point.
+
+```{r probability-sweep}
+map_dfr(seq(0.1, 0.9, by = 0.1), function(p) {
+  d <- hindcast_q |> mutate(flag = p_exceed >= p, actual = actual_7dadm_C >= threshold_7dadm)
+  tp <- sum(d$flag & d$actual); tn <- sum(!d$flag & !d$actual)
+  fp <- sum(d$flag & !d$actual); fn <- sum(!d$flag & d$actual)
+  tibble(alert_at = p, flagged = sum(d$flag),
+         sensitivity = tp / (tp + fn), specificity = tn / (tn + fp),
+         precision = if (tp + fp > 0) tp / (tp + fp) else NA_real_,
+         accuracy = (tp + tn) / nrow(d), missed = fn, false_alarms = fp)
+}) |>
+  kable(digits = 3,
+        col.names = c("Alert at P >=", "Days flagged", "Sensitivity", "Specificity",
+                      "Precision", "Accuracy", "Missed", "False alarms"))
+```
+
+```{r probability-sweep-by-lead}
+map_dfr(c(0.3, 0.5), function(p) {
+  hindcast_q |>
+    mutate(flag = p_exceed >= p, actual = actual_7dadm_C >= threshold_7dadm) |>
+    group_by(lead_days) |>
+    summarise(alert_at = p, n = n(),
+              sensitivity = sum(flag & actual) / max(1, sum(actual)),
+              specificity = sum(!flag & !actual) / max(1, sum(!actual)),
+              .groups = "drop")
+}) |>
+  pivot_wider(names_from = alert_at, values_from = c(sensitivity, specificity)) |>
+  kable(digits = 3)
+```
+
+# Saved artifacts
+
+```{r save-models}
+walk(lead_days_vec, function(k) {
+  saveRDS(models_qrf[[as.character(k)]],
+          here("output", paste0("rm85_qrf_7dadm_delta_lead", k, ".rds")))
+})
+
+# The calibrated nominal level per lead is part of the model contract — an
+# interval read at the wrong level is not an 80% interval. Saved alongside
+# so downstream code doesn't have to re-derive it.
+calibrated |>
+  left_join(calibration_check, by = c("lead_days", "calibrated_nominal")) |>
+  select(lead_days, calibrated_nominal, test_coverage, hindcast_coverage) |>
+  write_csv(here("output", "rm85_qrf_interval_calibration.csv"))
+
+cat("Quantile forests saved to output/rm85_qrf_7dadm_delta_lead*.rds\n")
+cat("Interval calibration saved to output/rm85_qrf_interval_calibration.csv\n")
+```
+
+These sit **alongside** `rm85_rf_7dadm_delta_lead*.rds`, which is
+unchanged and remains the point forecast. Like the point models they are
+trained on the change from today, so `dadm_m0` must be added back:
+
+```r
+qm <- predict(model, newdata, type = "quantiles", quantiles = q_grid)$predictions
+qm <- sweep(qm, 1, newdata$dadm_m0, "+")   # now in 7DADM space
+p_exceed <- rowMeans(qm >= 20)
+```

@@ -1,0 +1,19 @@
+url: https://flowwest.github.io/udwc_temperature/
+
+template:
+  bootstrap: 5
+
+navbar:
+  structure:
+    left:  [reference, articles]
+    right: [search, github]
+
+articles:
+- title: Data sources
+  navbar: Data sources
+  contents:
+  - air-temperature-source
+
+# `reference:` is intentionally omitted so pkgdown generates the index
+# automatically — a hand-maintained list has to be updated every time a
+# function or dataset is added, and silently fails the build when it isn't.
