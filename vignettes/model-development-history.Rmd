@@ -270,54 +270,153 @@ $\widehat{\text{7DADM}}(R+k) = \text{7DADM}(R) + \widehat{\Delta}_k$. The
 issue-date observation is retained in the predictor set, allowing the
 magnitude of the predicted change to be conditioned on current state.
 
-### 6.4 Rationale
+### 6.4 Stationarity of the response variable
 
-The formulation is motivated by the location of the model's exposure to
-the error sources identified in Section 6.2.
+The formulation's principal justification is that $\Delta_k$ is
+approximately stationary across years whereas the level is not. This can
+be evaluated directly from the historical record, independently of any
+model. The following summarises, by season, the mean 7DADM level and the
+dispersion of the seven-day change:
 
-Under an absolute response, the model must reconstruct the temperature
-level from its predictors, and the weather predictors — the ones subject
-to train/serve mismatch — participate directly in that reconstruction.
-Error in those predictors therefore propagates into the level, and does so
-increasingly with lead time as forecast quality declines.
+```{r stationarity}
+season <- rm_8_5_historical |>
+  filter(statistic == "7DADM", !is.na(temperature)) |>
+  mutate(date = as.Date(date)) |>
+  arrange(date) |>
+  filter(lubridate::month(date) %in% 5:10) |>
+  mutate(delta7 = if_else(as.numeric(date - lag(date, 7)) == 7,
+                          temperature - lag(temperature, 7), NA_real_))
 
-Under the change formulation, the level is supplied by
+by_year <- season |>
+  group_by(year = lubridate::year(date)) |>
+  summarise(level_mean = mean(temperature),
+            delta_mean = mean(delta7, na.rm = TRUE),
+            delta_sd   = sd(delta7,   na.rm = TRUE),
+            .groups = "drop") |>
+  filter(!is.na(delta_sd))
+
+summarise(by_year,
+          level_mean_min = min(level_mean), level_mean_max = max(level_mean),
+          delta_sd_min   = min(delta_sd),   delta_sd_max   = max(delta_sd)) |>
+  round(2)
+```
+
+Across the historical seasons the mean level varies by roughly
+`r round(diff(range(by_year$level_mean)), 1)` °C between years, while the
+dispersion of the seven-day change occupies a narrow band and its mean sits
+near zero in every season. The quantity the absolute formulation must
+predict therefore relocates substantially from year to year; the quantity
+the change formulation must predict does not.
+
+The 2026 season provides an out-of-sample test of this property. Its mean
+level, 21.3 °C, lies above every season in the historical record and
+approximately 4.6 °C above the historical mean of seasonal means. Its
+seven-day change has a standard deviation of 1.89 °C, which falls inside
+the historical range, and a 5th–95th percentile span of −2.1 to +3.9 °C
+against a historical span of −3.2 to +2.8 °C. The level moved outside all
+prior experience; the change did not.
+
+### 6.5 Rationale
+
+Three distinct mechanisms follow from Section 6.4, addressing the error
+sources identified in Section 6.2.
+
+**(i) Location of exposure to predictor error.** Under an absolute
+response the model must reconstruct the temperature level from its
+predictors, and the weather predictors — those subject to the train/serve
+mismatch of Section 4 — participate directly in that reconstruction. Error
+in them propagates into the level, increasingly with lead time as forecast
+quality declines. Under the change formulation the level is supplied by
 $\text{7DADM}(R)$, a direct observation of the response variable at the
-site. This quantity is identical in training and in operation; it is not
-a modelled or archived proxy and is not subject to the mismatch. The
-predictors are required only to estimate a departure from it. Weather
-predictor error can therefore corrupt the estimated change, but cannot
-corrupt the level to which that change is applied.
+site, identical in training and in operation and not subject to the
+mismatch. Predictor error can corrupt the estimated change but not the
+level to which that change is applied.
 
-The same argument accounts for robustness to distributional shift. The
-2026 season was the warmest in the 15-year record (mean 7DADM +2.96 °C
-above the 2011–2025 mean; 47% of days at or above threshold against a
-historical median of 24%), and 20% of observations exceeded the training
-maximum. A random forest cannot predict beyond the range of values held in
-its terminal nodes. Under the change formulation this constraint applies
-only to $\Delta_k$, whose distribution is approximately stationary across
-years, while the level enters additively and is unconstrained by the
-training range.
+**(ii) Relaxation of the range constraint.** A random forest returns an
+average of response values held in its terminal nodes and therefore cannot
+predict outside the range represented in training. Twenty percent of 2026
+observations exceeded the training maximum, so under an absolute response
+those values were not attainable. Under the change formulation the level
+enters additively and outside the model, so a prediction may exceed the
+training range provided the estimated change lies within it — and by
+Section 6.4 it generally does.
 
-This reasoning is supported by the failure of the seasonal anomaly
-predictors (Table 3). Anomaly features were introduced on the expectation
-that they would improve performance in an anomalous year, and instead
-degraded it significantly. In 2026, 61% of anomaly values exceeded the
-training 95th percentile and 13% exceeded the training maximum, so the
-predictor was saturated for much of the season while continuing to occupy
-candidate-split positions. Supplying the anomaly as a *predictor*
-reintroduces the range constraint that the change formulation removes by
-handling the level outside the model.
+The failure of the seasonal anomaly predictors (Table 1) supports this
+reading. Those predictors were introduced on the expectation of improving
+performance in an anomalous season and degraded it significantly. In 2026,
+61% of anomaly values exceeded the training 95th percentile and 13%
+exceeded the training maximum, leaving the predictor saturated for much of
+the season while continuing to occupy candidate-split positions. Supplying
+the anomaly as a *predictor* reintroduces precisely the range constraint
+that the change formulation removes by handling the level outside the
+model.
 
-### 6.5 Verification against persistence
+**(iii) Allocation of model capacity.** A substantial share of the
+variance in the absolute response is seasonal climatology. Under an
+absolute response the model expends capacity re-deriving the annual cycle
+from day-of-year and related predictors. Supplying the level directs the
+whole model to the departure from it, which is the component that is
+genuinely uncertain and that the predictors are informative about.
+
+### 6.6 Interpretation of fit statistics
+
+$\Delta_k$ has substantially smaller variance than the level. A model
+fitted to it may therefore report a lower R² *on its own response* while
+producing more accurate temperature forecasts, since R² is scaled by the
+variance of the quantity being predicted. Comparisons between the two
+formulations are made on bias and RMSE of the reconstructed temperature,
+which is the quantity of operational interest and is on a common scale
+across formulations.
+
+### 6.7 Verification against persistence
 
 Because the formulation is anchored on persistence, it was verified that
-it does not reduce to persistence. On the 2026 hindcast the model
-outperforms persistence at every lead time, with the margin increasing
-from 0.18 °C at lead 1 to 0.76 °C at lead 7 — the opposite of the pattern
-expected if the anchor were doing the work. The effect size of the
-formulation change (Table 3) is six to ten times that of the weather
-source substitution, which was not significant.
+it does not reduce to it. On the 2026 hindcast the model outperforms
+persistence at every lead time, with the margin *increasing* from 0.18 °C
+at lead 1 to 0.76 °C at lead 7. A model coasting on the anchor would show
+the opposite pattern, the margin narrowing as the anchor became less
+informative. The effect size of the formulation change (Table 1) is six to
+ten times that of the weather source substitution, which was not
+significant.
+
+### 6.8 Conditions and limitations
+
+The formulation depends on conditions that hold at this site but are not
+general.
+
+*An observation of the response must be available at forecast issue.* The
+approach was not available earlier in this project: prior to installation
+of the RM 8.5 logger, the corresponding predictor was a stand-in drawn
+from the historical record, and anchoring on a substituted value would not
+have conferred the properties described above.
+
+*The response must be autocorrelated.* The anchor is informative only
+because 7DADM is strongly persistent (Section 3.3). The approach would not
+transfer to a weakly autocorrelated response.
+
+*The anchor becomes a single point of failure.* Error in
+$\text{7DADM}(R)$ propagates directly and undiminished into every
+forecast. Sensor reliability is correspondingly more consequential under
+this formulation than under an absolute one.
+
+*The anchor's value decays with lead time.* At seven days it remains
+clearly beneficial (Section 6.7). At longer horizons persistence weakens
+and a blend toward climatology would be expected to outperform a
+persistence anchor; the point at which this occurs has not been
+established.
+
+### 6.9 Relation to established methods
+
+The formulation is an instance of a general approach rather than a novel
+one, and appears under several names: *differencing* in time-series
+analysis, where it is applied for the same reason — to render a
+non-stationary series stationary before modelling; *anomaly* or
+*increment* forecasting in numerical weather prediction post-processing;
+and *residual learning* in machine learning, where a model is fitted to
+$H(x) - x$ rather than $H(x)$. Gradient boosting is a sequential
+application of the same principle. The operative heuristic is that where a
+current observation of an autocorrelated response is available, the change
+is generally the better modelling target.
 
 ## 7. Current model specification
 
