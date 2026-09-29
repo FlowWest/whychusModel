@@ -38,6 +38,7 @@
     <li><a class="dropdown-item" href="../articles/model-development-history.html">Development of the RM 8.5 Instream Temperature Forecast Model</a></li>
     <li><hr class="dropdown-divider"></li>
     <li><h6 class="dropdown-header" data-toc-skip>Data sources</h6></li>
+    <li><a class="dropdown-item" href="../articles/model-inputs.html">Model Input Datasets</a></li>
     <li><a class="dropdown-item" href="../articles/air-temperature-source.html">Choosing an Air Temperature Forecast Source</a></li>
   </ul>
 </li>
@@ -401,54 +402,161 @@ the magnitude of the predicted change to be conditioned on current
 state.</p>
 </div>
 <div class="section level3">
-<h3 id="rationale">6.4 Rationale<a class="anchor" aria-label="anchor" href="#rationale"></a>
+<h3 id="stationarity-of-the-response-variable">6.4 Stationarity of the response variable<a class="anchor" aria-label="anchor" href="#stationarity-of-the-response-variable"></a>
 </h3>
-<p>The formulation is motivated by the location of the model’s exposure
-to the error sources identified in Section 6.2.</p>
-<p>Under an absolute response, the model must reconstruct the
-temperature level from its predictors, and the weather predictors — the
-ones subject to train/serve mismatch — participate directly in that
-reconstruction. Error in those predictors therefore propagates into the
-level, and does so increasingly with lead time as forecast quality
-declines.</p>
-<p>Under the change formulation, the level is supplied by
-<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">7DADM</mtext><mo stretchy="false" form="prefix">(</mo><mi>R</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\text{7DADM}(R)</annotation></semantics></math>,
-a direct observation of the response variable at the site. This quantity
-is identical in training and in operation; it is not a modelled or
-archived proxy and is not subject to the mismatch. The predictors are
-required only to estimate a departure from it. Weather predictor error
-can therefore corrupt the estimated change, but cannot corrupt the level
-to which that change is applied.</p>
-<p>The same argument accounts for robustness to distributional shift.
-The 2026 season was the warmest in the 15-year record (mean 7DADM +2.96
-°C above the 2011–2025 mean; 47% of days at or above threshold against a
-historical median of 24%), and 20% of observations exceeded the training
-maximum. A random forest cannot predict beyond the range of values held
-in its terminal nodes. Under the change formulation this constraint
-applies only to
-<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi mathvariant="normal">Δ</mi><mi>k</mi></msub><annotation encoding="application/x-tex">\Delta_k</annotation></semantics></math>,
-whose distribution is approximately stationary across years, while the
-level enters additively and is unconstrained by the training range.</p>
-<p>This reasoning is supported by the failure of the seasonal anomaly
-predictors (Table 3). Anomaly features were introduced on the
-expectation that they would improve performance in an anomalous year,
-and instead degraded it significantly. In 2026, 61% of anomaly values
-exceeded the training 95th percentile and 13% exceeded the training
-maximum, so the predictor was saturated for much of the season while
-continuing to occupy candidate-split positions. Supplying the anomaly as
-a <em>predictor</em> reintroduces the range constraint that the change
-formulation removes by handling the level outside the model.</p>
+<p>The formulation’s principal justification is that
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi mathvariant="normal">Δ</mi><mi>k</mi></msub><annotation encoding="application/x-tex">\Delta_k</annotation></semantics></math>
+is approximately stationary across years whereas the level is not. This
+can be evaluated directly from the historical record, independently of
+any model. The following summarises, by season, the mean 7DADM level and
+the dispersion of the seven-day change:</p>
+<div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="va">season</span> <span class="op">&lt;-</span> <span class="va">rm_8_5_historical</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">statistic</span> <span class="op">==</span> <span class="st">"7DADM"</span>, <span class="op">!</span><span class="fu"><a href="https://rdrr.io/r/base/NA.html" class="external-link">is.na</a></span><span class="op">(</span><span class="va">temperature</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>date <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/as.Date.html" class="external-link">as.Date</a></span><span class="op">(</span><span class="va">date</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange</a></span><span class="op">(</span><span class="va">date</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="fu">lubridate</span><span class="fu">::</span><span class="fu"><a href="https://lubridate.tidyverse.org/reference/month.html" class="external-link">month</a></span><span class="op">(</span><span class="va">date</span><span class="op">)</span> <span class="op"><a href="https://rdrr.io/r/base/match.html" class="external-link">%in%</a></span> <span class="fl">5</span><span class="op">:</span><span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>delta7 <span class="op">=</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/if_else.html" class="external-link">if_else</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/numeric.html" class="external-link">as.numeric</a></span><span class="op">(</span><span class="va">date</span> <span class="op">-</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/lead-lag.html" class="external-link">lag</a></span><span class="op">(</span><span class="va">date</span>, <span class="fl">7</span><span class="op">)</span><span class="op">)</span> <span class="op">==</span> <span class="fl">7</span>,</span>
+<span>                          <span class="va">temperature</span> <span class="op">-</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/lead-lag.html" class="external-link">lag</a></span><span class="op">(</span><span class="va">temperature</span>, <span class="fl">7</span><span class="op">)</span>, <span class="cn">NA_real_</span><span class="op">)</span><span class="op">)</span></span>
+<span></span>
+<span><span class="va">by_year</span> <span class="op">&lt;-</span> <span class="va">season</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/group_by.html" class="external-link">group_by</a></span><span class="op">(</span>year <span class="op">=</span> <span class="fu">lubridate</span><span class="fu">::</span><span class="fu"><a href="https://lubridate.tidyverse.org/reference/year.html" class="external-link">year</a></span><span class="op">(</span><span class="va">date</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/summarise.html" class="external-link">summarise</a></span><span class="op">(</span>level_mean <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/mean.html" class="external-link">mean</a></span><span class="op">(</span><span class="va">temperature</span><span class="op">)</span>,</span>
+<span>            delta_mean <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/mean.html" class="external-link">mean</a></span><span class="op">(</span><span class="va">delta7</span>, na.rm <span class="op">=</span> <span class="cn">TRUE</span><span class="op">)</span>,</span>
+<span>            delta_sd   <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/stats/sd.html" class="external-link">sd</a></span><span class="op">(</span><span class="va">delta7</span>,   na.rm <span class="op">=</span> <span class="cn">TRUE</span><span class="op">)</span>,</span>
+<span>            .groups <span class="op">=</span> <span class="st">"drop"</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="op">!</span><span class="fu"><a href="https://rdrr.io/r/base/NA.html" class="external-link">is.na</a></span><span class="op">(</span><span class="va">delta_sd</span><span class="op">)</span><span class="op">)</span></span>
+<span></span>
+<span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/summarise.html" class="external-link">summarise</a></span><span class="op">(</span><span class="va">by_year</span>,</span>
+<span>          level_mean_min <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min</a></span><span class="op">(</span><span class="va">level_mean</span><span class="op">)</span>, level_mean_max <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max</a></span><span class="op">(</span><span class="va">level_mean</span><span class="op">)</span>,</span>
+<span>          delta_sd_min   <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min</a></span><span class="op">(</span><span class="va">delta_sd</span><span class="op">)</span>,   delta_sd_max   <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max</a></span><span class="op">(</span><span class="va">delta_sd</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://rdrr.io/r/base/Round.html" class="external-link">round</a></span><span class="op">(</span><span class="fl">2</span><span class="op">)</span></span>
+<span><span class="co">#&gt; <span style="color: #949494;"># A tibble: 1 × 4</span></span></span>
+<span><span class="co">#&gt;   level_mean_min level_mean_max delta_sd_min delta_sd_max</span></span>
+<span><span class="co">#&gt;            <span style="color: #949494; font-style: italic;">&lt;dbl&gt;</span>          <span style="color: #949494; font-style: italic;">&lt;dbl&gt;</span>        <span style="color: #949494; font-style: italic;">&lt;dbl&gt;</span>        <span style="color: #949494; font-style: italic;">&lt;dbl&gt;</span></span></span>
+<span><span class="co">#&gt; <span style="color: #BCBCBC;">1</span>           13.8           18.3         1.41         2.23</span></span></code></pre></div>
+<p>Across the historical seasons the mean level varies by roughly 4.5 °C
+between years, while the dispersion of the seven-day change occupies a
+narrow band and its mean sits near zero in every season. The quantity
+the absolute formulation must predict therefore relocates substantially
+from year to year; the quantity the change formulation must predict does
+not.</p>
+<p>The 2026 season provides an out-of-sample test of this property. Its
+mean level, 21.3 °C, lies above every season in the historical record
+and approximately 4.6 °C above the historical mean of seasonal means.
+Its seven-day change has a standard deviation of 1.89 °C, which falls
+inside the historical range, and a 5th–95th percentile span of −2.1 to
++3.9 °C against a historical span of −3.2 to +2.8 °C. The level moved
+outside all prior experience; the change did not.</p>
 </div>
 <div class="section level3">
-<h3 id="verification-against-persistence">6.5 Verification against persistence<a class="anchor" aria-label="anchor" href="#verification-against-persistence"></a>
+<h3 id="rationale">6.5 Rationale<a class="anchor" aria-label="anchor" href="#rationale"></a>
+</h3>
+<p>Three distinct mechanisms follow from Section 6.4, addressing the
+error sources identified in Section 6.2.</p>
+<p><strong>(i) Location of exposure to predictor error.</strong> Under
+an absolute response the model must reconstruct the temperature level
+from its predictors, and the weather predictors — those subject to the
+train/serve mismatch of Section 4 — participate directly in that
+reconstruction. Error in them propagates into the level, increasingly
+with lead time as forecast quality declines. Under the change
+formulation the level is supplied by
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">7DADM</mtext><mo stretchy="false" form="prefix">(</mo><mi>R</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\text{7DADM}(R)</annotation></semantics></math>,
+a direct observation of the response variable at the site, identical in
+training and in operation and not subject to the mismatch. Predictor
+error can corrupt the estimated change but not the level to which that
+change is applied.</p>
+<p><strong>(ii) Relaxation of the range constraint.</strong> A random
+forest returns an average of response values held in its terminal nodes
+and therefore cannot predict outside the range represented in training.
+Twenty percent of 2026 observations exceeded the training maximum, so
+under an absolute response those values were not attainable. Under the
+change formulation the level enters additively and outside the model, so
+a prediction may exceed the training range provided the estimated change
+lies within it — and by Section 6.4 it generally does.</p>
+<p>The failure of the seasonal anomaly predictors (Table 1) supports
+this reading. Those predictors were introduced on the expectation of
+improving performance in an anomalous season and degraded it
+significantly. In 2026, 61% of anomaly values exceeded the training 95th
+percentile and 13% exceeded the training maximum, leaving the predictor
+saturated for much of the season while continuing to occupy
+candidate-split positions. Supplying the anomaly as a <em>predictor</em>
+reintroduces precisely the range constraint that the change formulation
+removes by handling the level outside the model.</p>
+<p><strong>(iii) Allocation of model capacity.</strong> A substantial
+share of the variance in the absolute response is seasonal climatology.
+Under an absolute response the model expends capacity re-deriving the
+annual cycle from day-of-year and related predictors. Supplying the
+level directs the whole model to the departure from it, which is the
+component that is genuinely uncertain and that the predictors are
+informative about.</p>
+</div>
+<div class="section level3">
+<h3 id="interpretation-of-fit-statistics">6.6 Interpretation of fit statistics<a class="anchor" aria-label="anchor" href="#interpretation-of-fit-statistics"></a>
+</h3>
+<p><math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi mathvariant="normal">Δ</mi><mi>k</mi></msub><annotation encoding="application/x-tex">\Delta_k</annotation></semantics></math>
+has substantially smaller variance than the level. A model fitted to it
+may therefore report a lower R² <em>on its own response</em> while
+producing more accurate temperature forecasts, since R² is scaled by the
+variance of the quantity being predicted. Comparisons between the two
+formulations are made on bias and RMSE of the reconstructed temperature,
+which is the quantity of operational interest and is on a common scale
+across formulations.</p>
+</div>
+<div class="section level3">
+<h3 id="verification-against-persistence">6.7 Verification against persistence<a class="anchor" aria-label="anchor" href="#verification-against-persistence"></a>
 </h3>
 <p>Because the formulation is anchored on persistence, it was verified
-that it does not reduce to persistence. On the 2026 hindcast the model
-outperforms persistence at every lead time, with the margin increasing
-from 0.18 °C at lead 1 to 0.76 °C at lead 7 — the opposite of the
-pattern expected if the anchor were doing the work. The effect size of
-the formulation change (Table 3) is six to ten times that of the weather
+that it does not reduce to it. On the 2026 hindcast the model
+outperforms persistence at every lead time, with the margin
+<em>increasing</em> from 0.18 °C at lead 1 to 0.76 °C at lead 7. A model
+coasting on the anchor would show the opposite pattern, the margin
+narrowing as the anchor became less informative. The effect size of the
+formulation change (Table 1) is six to ten times that of the weather
 source substitution, which was not significant.</p>
+</div>
+<div class="section level3">
+<h3 id="conditions-and-limitations">6.8 Conditions and limitations<a class="anchor" aria-label="anchor" href="#conditions-and-limitations"></a>
+</h3>
+<p>The formulation depends on conditions that hold at this site but are
+not general.</p>
+<p><em>An observation of the response must be available at forecast
+issue.</em> The approach was not available earlier in this project:
+prior to installation of the RM 8.5 logger, the corresponding predictor
+was a stand-in drawn from the historical record, and anchoring on a
+substituted value would not have conferred the properties described
+above.</p>
+<p><em>The response must be autocorrelated.</em> The anchor is
+informative only because 7DADM is strongly persistent (Section 3.3). The
+approach would not transfer to a weakly autocorrelated response.</p>
+<p><em>The anchor becomes a single point of failure.</em> Error in
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mtext mathvariant="normal">7DADM</mtext><mo stretchy="false" form="prefix">(</mo><mi>R</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\text{7DADM}(R)</annotation></semantics></math>
+propagates directly and undiminished into every forecast. Sensor
+reliability is correspondingly more consequential under this formulation
+than under an absolute one.</p>
+<p><em>The anchor’s value decays with lead time.</em> At seven days it
+remains clearly beneficial (Section 6.7). At longer horizons persistence
+weakens and a blend toward climatology would be expected to outperform a
+persistence anchor; the point at which this occurs has not been
+established.</p>
+</div>
+<div class="section level3">
+<h3 id="relation-to-established-methods">6.9 Relation to established methods<a class="anchor" aria-label="anchor" href="#relation-to-established-methods"></a>
+</h3>
+<p>The formulation is an instance of a general approach rather than a
+novel one, and appears under several names: <em>differencing</em> in
+time-series analysis, where it is applied for the same reason — to
+render a non-stationary series stationary before modelling;
+<em>anomaly</em> or <em>increment</em> forecasting in numerical weather
+prediction post-processing; and <em>residual learning</em> in machine
+learning, where a model is fitted to
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>H</mi><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo stretchy="false" form="postfix">)</mo><mo>−</mo><mi>x</mi></mrow><annotation encoding="application/x-tex">H(x) - x</annotation></semantics></math>
+rather than
+<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>H</mi><mo stretchy="false" form="prefix">(</mo><mi>x</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">H(x)</annotation></semantics></math>.
+Gradient boosting is a sequential application of the same principle. The
+operative heuristic is that where a current observation of an
+autocorrelated response is available, the change is generally the better
+modelling target.</p>
 </div>
 </div>
 <div class="section level2">

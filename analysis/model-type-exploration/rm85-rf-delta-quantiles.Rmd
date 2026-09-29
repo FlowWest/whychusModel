@@ -108,8 +108,10 @@ cp_flow <- camp_polk_flow_historical |>
   mutate(date = as.Date(date)) |> filter(statistic == "mean") |>
   select(date, cp_flow_mean = flow_cfs)
 
-dyn_raw <- read_csv(here("data-raw", "dynamical_gfs_air_temp_historical.csv")) |>
-  mutate(valid_date = as.Date(valid_date))
+# Packaged snapshot of data-raw/dynamical_gfs_air_temp_historical.csv. Extend
+# the CSV with data-raw/pull_dynamical_forecasts.py, then re-knit the
+# dynamical.org chunk in data-raw/pull-historical-data.Rmd to refresh this.
+dyn_raw <- dynamical_gfs_forecasts
 ```
 
 ```{r helpers}

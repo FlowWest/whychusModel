@@ -7,5 +7,7 @@
 
 ### Data sources
 
+- [Model Input
+  Datasets](https://flowwest.github.io/udwc_temperature/articles/model-inputs.md):
 - [Choosing an Air Temperature Forecast
   Source](https://flowwest.github.io/udwc_temperature/articles/air-temperature-source.md):

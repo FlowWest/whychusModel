@@ -46,8 +46,8 @@ drops that comparison and builds the dynamical.org-trained models
 directly: same random forest architecture as `rm85-rf-lead-aware.Rmd` —
 same `fit_rf()` (500 trees, `mtry = floor(features/3)`), same chronological
 80/20 split, same feature slots — with the weather trajectory source
-swapped from Open-Meteo to dynamical.org
-(`data-raw/dynamical_gfs_air_temp_historical.csv`). Camp Polk and RM 8.5's
+swapped from Open-Meteo to dynamical.org (`dynamical_gfs_forecasts`).
+Camp Polk and RM 8.5's
 own lag remain sourced from the R package as before; only
 `air_max_dN`/`air_min_dN`/`cloud_dN` change source. dynamical.org's
 archive covers 2021-05-01 onward, so training here spans roughly 4.5
@@ -107,8 +107,10 @@ cp_flow <- camp_polk_flow_historical |>
   filter(statistic == "mean") |>
   select(date, cp_flow_mean = flow_cfs)
 
-dyn_raw <- read_csv(here("data-raw", "dynamical_gfs_air_temp_historical.csv")) |>
-  mutate(valid_date = as.Date(valid_date))
+# Packaged snapshot of data-raw/dynamical_gfs_air_temp_historical.csv. Extend
+# the CSV with data-raw/pull_dynamical_forecasts.py, then re-knit the
+# dynamical.org chunk in data-raw/pull-historical-data.Rmd to refresh this.
+dyn_raw <- dynamical_gfs_forecasts
 
 cat(sprintf("dynamical.org archive: %s to %s, %d rows\n",
             min(dyn_raw$valid_date), max(dyn_raw$valid_date), nrow(dyn_raw)))

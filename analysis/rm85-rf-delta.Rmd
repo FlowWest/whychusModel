@@ -26,33 +26,14 @@ library(cowplot)
 
 # Objective
 
-`rm85-rf-dynamical.Rmd` trains a random forest to predict RM 8.5's 7DADM
-directly. Against the real 2026 NWS hindcast that model carries a cold bias
-that grows with lead and concentrates in exactly the conditions the HCP
-threshold cares about — reaching -1.85°C on days observed at or above 20°C
-at lead 7, where it barely outperforms simply carrying today's value
-forward (RMSE 2.01 vs. persistence's 2.05).
-
-Diagnosis (worked through in detail before this document was written):
-
-* **Not** a warm-tail extrapolation problem. 31% of training rows are
-  already ≥20°C and the training maximum (24.06°C) exceeds anything
-  observed in 2026 (23.1°C); the prediction ceiling gap is under 0.9°C.
-* It is a **train/serve mismatch**. The model trains on archived GFS
-  weather but is served real NWS forecasts, and those two disagree by
-  1.7°C MAE at lead 1 growing to 2.8°C at lead 7 (cloud cover is worse
-  still: +15 pp bias, r falling to 0.58). A model that predicts an
-  absolute temperature leans hard on those mismatched weather columns, so
-  it degrades badly at long leads in the real world.
-
 This document reframes the target as the **change from today** rather than
 the absolute level: the forest is trained on `rm_8_5_7dadm - dadm_m0` and
 the prediction adds `dadm_m0` back. Because `dadm_m0` is a real RM 8.5
 observation — identical at training and serving time — the model is
 anchored on something the mismatch cannot corrupt, and only has to learn
-the correction. Measured on the real 2026 hindcast, that single change is
-worth -0.29 to -0.40 RMSE (paired t-test, p < 0.001), roughly 6-10x larger
-than any effect from swapping the weather source itself.
+the correction. 
+
+The prediction of the change from today is better suited for anamolous years because the random forest model has a difficult time predicting outside of its training dataset values. However, the delta between day 0 and day 7 is not anamolous even in anamolous years. 
 
 Two supporting additions, each independently significant (p < 0.001):
 
@@ -63,11 +44,10 @@ Two supporting additions, each independently significant (p < 0.001):
   individual columns and `mtry` samples only a third of them, so explicit
   summaries concentrate a signal the forest otherwise has to rediscover.
 
-Everything else is unchanged from `rm85-rf-dynamical.Rmd`: same
-dynamical.org GFS weather source, same 500-tree forests, same
-chronological 80/20 split, same same-day RM 8.5 inputs. A head-to-head
-against Open-Meteo's Previous Runs archive found no significant difference
-in skill at this configuration (p = 0.46), so the source is left as-is.
+Overall structure: dynamical.org GFS weather source, 500-tree forests, 
+chronological 80/20 split,  same-day RM 8.5 inputs. 
+
+Date range of training data: 2021-05-02 to 2026-09-07 (based on dynamical.org limitation)
 
 ```{r config}
 month_start     <- 5
@@ -115,8 +95,10 @@ cp_flow <- camp_polk_flow_historical |>
   filter(statistic == "mean") |>
   select(date, cp_flow_mean = flow_cfs)
 
-dyn_raw <- read_csv(here("data-raw", "dynamical_gfs_air_temp_historical.csv")) |>
-  mutate(valid_date = as.Date(valid_date))
+# Packaged snapshot of data-raw/dynamical_gfs_air_temp_historical.csv. Extend
+# the CSV with data-raw/pull_dynamical_forecasts.py, then re-knit the
+# dynamical.org chunk in data-raw/pull-historical-data.Rmd to refresh this.
+dyn_raw <- dynamical_gfs_forecasts
 
 cat(sprintf("dynamical.org archive: %s to %s, %d rows\n",
             min(dyn_raw$valid_date), max(dyn_raw$valid_date), nrow(dyn_raw)))
@@ -350,8 +332,7 @@ ggplot(importance_top, aes(x = feature_order, y = pct_inc_mse, fill = factor(lea
 
 # Real 2026 hindcast
 
-Same real-data pipeline as `summer_2026_8_5_performance.Rmd`: cached real
-NWS forecasts, a fresh Camp Polk pull, and the real RM 8.5 logger record.
+Cached real NWS forecasts, a fresh Camp Polk pull, and the real RM 8.5 logger record.
 This is the evaluation that matters — it is the only one where the weather
 inputs come from the NWS product actually used operationally rather than
 from the GFS archive the model was trained on.
@@ -498,8 +479,7 @@ metrics_table |>
 
 ## Warm conditions only
 
-The regime the HCP threshold actually cares about, and the one the previous
-design handled worst.
+This filters the data to only include actual >= 20*C. We care more about whether the model performs well at warmer temperatures and this tests that. 
 
 ```{r hindcast-warm-metrics}
 forecast_eval |>
@@ -516,6 +496,8 @@ A forecast is only worth running if it beats carrying today's value
 forward. `dadm_m0` is exactly that null model, and because this design is
 anchored on it the comparison is the honest test of whether the forest is
 adding anything.
+
+TODO: I don't understand this. 
 
 ```{r hindcast-vs-persistence}
 bind_rows(
@@ -600,6 +582,8 @@ print(p_box); print(p_warm)
 
 ## Skill against persistence, by lead
 
+TODO - I don't understand this 
+
 ```{r skill-plot, fig.height=4.5}
 bind_rows(
   forecast_eval |> transmute(lead = as.integer(as.character(lead_days)),
@@ -666,13 +650,7 @@ Where the calls land in time matters as much as the rates. Misses
 clustering on particular days points at a shared cause rather than random
 error — and they do cluster, hard.
 
-The weather panel underneath shares the same date axis, so the driver and
-the response line up directly. It plots the NWS max-air-temperature
-forecast at two horizons: `lead_days == 0` (issued the same day, the
-closest thing in this log to an observation) and `lead_days == 7`. The
-vertical dashed lines mark the days the observed 7DADM first crossed the
-threshold from below — read down from a miss cluster to see what the air
-temperature was doing, and how far ahead the week-out forecast saw it.
+TODO: remove weather panel. It doesn't make sense becaued
 
 ```{r exceedance-timeline, fig.height=8}
 # Days the OBSERVED series first crossed the threshold from below. Reused

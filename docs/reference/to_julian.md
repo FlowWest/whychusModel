@@ -25,7 +25,7 @@ An integer vector of day-of-year values between 1 and 366.
 to_julian("2023-07-15")   # returns 196
 #> [1] 196
 to_julian(Sys.Date())
-#> [1] 240
+#> [1] 259
 
 # use in a dplyr pipeline
 df |> mutate(julian_day = to_julian(date))

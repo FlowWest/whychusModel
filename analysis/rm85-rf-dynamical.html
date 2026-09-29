@@ -11,7 +11,7 @@
 
 <meta name="author" content="Maddee Wiggins (FlowWest)" />
 
-<meta name="date" content="2026-08-12" />
+<meta name="date" content="2026-09-16" />
 
 <title>RM 8.5 7DADM — Random Forest Trained on dynamical.org GFS</title>
 
@@ -1588,7 +1588,7 @@ border-radius: 0px;
 <h1 class="title toc-ignore">RM 8.5 7DADM — Random Forest Trained on
 dynamical.org GFS</h1>
 <h4 class="author">Maddee Wiggins (FlowWest)</h4>
-<h4 class="date">2026-08-12</h4>
+<h4 class="date">2026-09-16</h4>
 
 </div>
 
@@ -1618,9 +1618,9 @@ models directly: same random forest architecture as
 <code>rm85-rf-lead-aware.Rmd</code> — same <code>fit_rf()</code> (500
 trees, <code>mtry = floor(features/3)</code>), same chronological 80/20
 split, same feature slots — with the weather trajectory source swapped
-from Open-Meteo to dynamical.org
-(<code>data-raw/dynamical_gfs_air_temp_historical.csv</code>). Camp Polk
-and RM 8.5’s own lag remain sourced from the R package as before; only
+from Open-Meteo to dynamical.org (<code>dynamical_gfs_forecasts</code>).
+Camp Polk and RM 8.5’s own lag remain sourced from the R package as
+before; only
 <code>air_max_dN</code>/<code>air_min_dN</code>/<code>cloud_dN</code>
 change source. dynamical.org’s archive covers 2021-05-01 onward, so
 training here spans roughly 4.5 years rather than Open-Meteo’s 14 — less
@@ -1676,12 +1676,14 @@ cp_flow &lt;- camp_polk_flow_historical |&gt;
   filter(statistic == &quot;mean&quot;) |&gt;
   select(date, cp_flow_mean = flow_cfs)
 
-dyn_raw &lt;- read_csv(here(&quot;data-raw&quot;, &quot;dynamical_gfs_air_temp_historical.csv&quot;)) |&gt;
-  mutate(valid_date = as.Date(valid_date))
+# Packaged snapshot of data-raw/dynamical_gfs_air_temp_historical.csv. Extend
+# the CSV with data-raw/pull_dynamical_forecasts.py, then re-knit the
+# dynamical.org chunk in data-raw/pull-historical-data.Rmd to refresh this.
+dyn_raw &lt;- dynamical_gfs_forecasts
 
 cat(sprintf(&quot;dynamical.org archive: %s to %s, %d rows\n&quot;,
             min(dyn_raw$valid_date), max(dyn_raw$valid_date), nrow(dyn_raw)))</code></pre>
-<pre><code>## dynamical.org archive: 2021-05-02 to 2026-01-07, 35826 rows</code></pre>
+<pre><code>## dynamical.org archive: 2021-05-02 to 2026-09-07, 40929 rows</code></pre>
 <pre class="r"><code># dynamical.org equivalent of rm85-rf-lead-aware.Rmd&#39;s get_forecast() — no
 # lead-0 fallback needed since every lead 1-7 here is a genuine forecast
 # value (not a proxy that sometimes needs backfilling from an &quot;observed&quot;
