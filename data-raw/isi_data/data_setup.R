@@ -1,5 +1,5 @@
 # data-raw/isi_data/data_setup.R
-# One-time setup: seed data-live/hydrovu_readings.rds from an isi-data.com CSV
+# One-time setup: seed data-live/whychus_rm8p5.Rds from an isi-data.com CSV
 # export, then backfill from HydroVu so the scheduled refresh
 # (scripts/fetch_hydrovu.R) picks up where this leaves off. Run on the `data`
 # branch and commit the resulting .rds there.

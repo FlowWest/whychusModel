@@ -4,7 +4,7 @@
 
 HV_LOCATION_NAME <- "Whychus Creek RM 8.5"
 
-HV_DATA_FILE <- here::here("data-live", "hydrovu_readings.rds")
+HV_DATA_FILE <- here::here("data-live", "whychus_rm8p5.Rds")
 
 # The device logs in local clock time, which HydroVu returns as UTC epochs
 # (e.g. a 12:00 PDT reading comes back as 12:00 UTC). Timestamps are corrected
