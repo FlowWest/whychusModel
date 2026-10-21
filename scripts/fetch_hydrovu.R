@@ -23,9 +23,11 @@ START_FRESH <- FALSE
 
 ## LOAD EXISTING DATA ==========================================================
 
+# hv_validate_readings() projects onto the rhydrovu schema columns
 existing_data <- if (file.exists(DATA_FILE) && !START_FRESH) {
   message("Loading existing dataset.")
-  readRDS(DATA_FILE)
+  readRDS(DATA_FILE) |>
+    hv_validate_readings()
 } else {
   message("No existing dataset loaded.")
   NULL
@@ -35,28 +37,35 @@ existing_data <- if (file.exists(DATA_FILE) && !START_FRESH) {
 
 con <- hv_connect()
 
-locs <- hv_site_location(con)
+locs <- hv_site_locations(con)
 
 windows <- hv_compute_windows(existing_data, locs,
                               overlap_days     = OVERLAP_DAYS,
                               fresh_start_days = FRESH_START_DAYS,
                               start_fresh      = is.null(existing_data))
 
-new_data <- hv_readings(con,
+raw_data <- hv_readings(con,
                         location_ids = windows$location_id,
                         start        = windows$start_ts,
-                        end          = windows$end_ts) |>
+                        end          = windows$end_ts)
+
+# hv_readings() returns a column-less tibble when there is nothing new
+if (nrow(raw_data) == 0L) {
+  message("No new records; leaving ", DATA_FILE, " unchanged.")
+  quit(save = "no")
+}
+
+new_data <- raw_data |>
   filter(parameter_id %in% hv_params$parameter_id) |>
   hv_fix_device_time() |>
-  inner_join(locs, by = join_by(location_id)) |>
-  relocate(name, .after = location_id)
+  hv_validate_readings()
 
 message("Loaded ", nrow(new_data), " new records.")
 
 ## APPEND + SAVE ===============================================================
 
 combined <- hv_append(existing_data, new_data) |>
-  arrange(parameter_id, timestamp)
+  arrange(location_id, parameter_id, timestamp)
 
 dir.create(dirname(DATA_FILE), showWarnings = FALSE)
 saveRDS(combined, DATA_FILE)
