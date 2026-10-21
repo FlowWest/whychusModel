@@ -2,9 +2,13 @@
 # Shared config for the HydroVu pipeline (sourced by scripts/fetch_hydrovu.R
 # and data-raw/isi_data/data_setup.R)
 
-HV_LOCATION_NAME <- "Whychus Creek RM 8.5"
+# HydroVu locations to pull (names as in hv_locations(con))
+HV_LOCATIONS <- c("Whychus Creek RM 8.5")
 
-HV_DATA_FILE <- here::here("data-live", "whychus_rm8p5.Rds")
+# Readings are stored in the rhydrovu schema (location_id, parameter_id,
+# unit_id, timestamp, value); resolve names with the hydrovu_locations,
+# hydrovu_parameters and hydrovu_units package datasets.
+HV_DATA_FILE <- here::here("data-live", "hv_data.Rds")
 
 # The device logs in local clock time, which HydroVu returns as UTC epochs
 # (e.g. a 12:00 PDT reading comes back as 12:00 UTC). Timestamps are corrected
@@ -14,29 +18,30 @@ HV_DATA_FILE <- here::here("data-live", "whychus_rm8p5.Rds")
 # UTC-8 clock with no DST).
 HV_DEVICE_TZ <- "America/Los_Angeles"
 
-# Parameters to keep, with IDs from hv_parameters(con) and the
-# /sispec/friendlynames unit list. `csv_col` is the matching column in
-# isi-data.com CSV exports (used for one-time seeding only). Battery Voltage is
-# not currently reported to HydroVu for this location, so it only comes from
-# the CSV seed until it is.
+# Parameters to keep. `csv_col` is the matching column in isi-data.com CSV
+# exports (used for one-time seeding only). Battery Voltage is not currently
+# reported to HydroVu for this location, so it only comes from the CSV seed
+# until it is.
 hv_params <- tibble::tribble(
-  ~parameter_id, ~parameter_name,          ~unit_id, ~csv_col,
-  "1",           "Temperature",            "1",      "Temperature C",
-  "2",           "Pressure",               "17",     "Pressure PSI",
-  "10",          "Specific Conductivity",  "65",     "Specific Conductivity µS/cm",
-  "26",          "Battery Voltage",        "163",    "TL Battery V"
+  ~parameter_id, ~unit_id, ~csv_col,
+  "1",           "1",      "Temperature C",                     # Temperature (C)
+  "2",           "17",     "Pressure PSI",                      # Pressure (psi)
+  "10",          "65",     "Specific Conductivity µS/cm",  # Specific Conductivity (µS/cm)
+  "26",          "163",    "TL Battery V"                       # Battery Voltage (V)
 )
 
-# Look up the location row (location_id, name) for HV_LOCATION_NAME
-hv_site_location <- function(con) {
-  loc <- rhydrovu::hv_locations(con) |>
-    dplyr::filter(name == HV_LOCATION_NAME) |>
+# Look up the location rows (location_id, name) for HV_LOCATIONS
+hv_site_locations <- function(con) {
+  locs <- rhydrovu::hv_locations(con) |>
+    dplyr::filter(name %in% HV_LOCATIONS) |>
     dplyr::select(location_id, name)
-  if (nrow(loc) != 1L) {
-    stop("Expected exactly one HydroVu location named '", HV_LOCATION_NAME,
-         "', found ", nrow(loc), ".", call. = FALSE)
+  missing <- setdiff(HV_LOCATIONS, locs$name)
+  if (length(missing) > 0L || anyDuplicated(locs$name)) {
+    stop("Could not resolve exactly one HydroVu location for: ",
+         paste(union(missing, locs$name[duplicated(locs$name)]), collapse = ", "),
+         call. = FALSE)
   }
-  loc
+  locs
 }
 
 # Reinterpret HydroVu timestamps as HV_DEVICE_TZ wall-clock time, return in UTC.

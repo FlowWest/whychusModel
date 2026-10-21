@@ -255,3 +255,53 @@
 #'   \url{https://dynamical.org}. Pulled by
 #'   \code{data-raw/pull_dynamical_forecasts.py}.
 "dynamical_gfs_forecasts"
+
+#' HydroVu locations lookup
+#'
+#' Locations visible to the HydroVu account, for resolving \code{location_id}
+#' in the HydroVu readings stored at \code{data-live/hv_data.Rds} on the
+#' \code{data} branch.
+#'
+#' @format A data frame with columns:
+#' \describe{
+#'   \item{\code{location_id}}{Character. HydroVu location ID.}
+#'   \item{\code{name}}{Character. Location name.}
+#'   \item{\code{description}}{Character. Location description.}
+#'   \item{\code{gps_latitude}}{Numeric. Latitude.}
+#'   \item{\code{gps_longitude}}{Numeric. Longitude.}
+#' }
+#'
+#' @source HydroVu public API via \code{rhydrovu::hv_locations()}. Built by
+#'   \code{data-raw/hydrovu_lookups.R}.
+"hydrovu_locations"
+
+#' HydroVu parameters lookup
+#'
+#' All HydroVu parameter friendly-names, for resolving \code{parameter_id} in
+#' the HydroVu readings stored at \code{data-live/hv_data.Rds} on the
+#' \code{data} branch.
+#'
+#' @format A data frame with columns:
+#' \describe{
+#'   \item{\code{parameter_id}}{Character. HydroVu parameter ID.}
+#'   \item{\code{parameter_name}}{Character. Parameter name, e.g. \code{"Temperature"}.}
+#' }
+#'
+#' @source HydroVu public API via \code{rhydrovu::hv_parameters()}. Built by
+#'   \code{data-raw/hydrovu_lookups.R}.
+"hydrovu_parameters"
+
+#' HydroVu units lookup
+#'
+#' All HydroVu unit friendly-names, for resolving \code{unit_id} in the HydroVu
+#' readings stored at \code{data-live/hv_data.Rds} on the \code{data} branch.
+#'
+#' @format A data frame with columns:
+#' \describe{
+#'   \item{\code{unit_id}}{Character. HydroVu unit ID.}
+#'   \item{\code{unit_name}}{Character. Unit abbreviation, e.g. \code{"psi"}.}
+#' }
+#'
+#' @source HydroVu public API via \code{rhydrovu::hv_units()}. Built by
+#'   \code{data-raw/hydrovu_lookups.R}.
+"hydrovu_units"

@@ -78,7 +78,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add data-live/whychus_rm8p5.Rds
+          git add data-live/hv_data.Rds
           git commit -m "Daily HydroVu refresh" || echo "No changes"
 
           for i in 1 2 3 4 5; do
