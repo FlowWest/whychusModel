@@ -19,15 +19,13 @@ HV_DATA_FILE <- here::here("data-live", "hv_data.Rds")
 HV_DEVICE_TZ <- "America/Los_Angeles"
 
 # Parameters to keep. `csv_col` is the matching column in isi-data.com CSV
-# exports (used for one-time seeding only). Battery Voltage is not currently
-# reported to HydroVu for this location, so it only comes from the CSV seed
-# until it is.
+# exports (used for one-time seeding only). Battery Voltage is in the CSV
+# export but not reported to HydroVu for this location, so it is left out.
 hv_params <- tibble::tribble(
   ~parameter_id, ~unit_id, ~csv_col,
   "1",           "1",      "Temperature C",                     # Temperature (C)
   "2",           "17",     "Pressure PSI",                      # Pressure (psi)
-  "10",          "65",     "Specific Conductivity µS/cm",  # Specific Conductivity (µS/cm)
-  "26",          "163",    "TL Battery V"                       # Battery Voltage (V)
+  "10",          "65",     "Specific Conductivity µS/cm"   # Specific Conductivity (µS/cm)
 )
 
 # Look up the location rows (location_id, name) for HV_LOCATIONS
