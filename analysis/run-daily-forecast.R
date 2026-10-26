@@ -12,20 +12,34 @@ today <- as.Date(Sys.time(), tz = "America/Los_Angeles")
 cat(sprintf("Running RM 8.5 forecast for %s\n", today))
 
 # ── Config ────────────────────────────────────────────────────────────────────
-lead_days_vec       <- c(1, 3, 7)
-owrd_station        <- "14076100"  # Camp Polk
-owrd_backup_station <- "14076050"  # WAS gage — used only if Camp Polk fails
+lead_days_vec       <- 1:7
+owrd_station             <- "14076100"  # Camp Polk
+owrd_flow_backup_station <- "14076050"  # Whychus Cr at Sisters (WAS) — flow backup
+owrd_temp_backup_station <- "14075000"  # Whychus Cr nr Sisters — temperature backup
 nws_gridpoint       <- "PDT/35,57" # RM 8.5 area near Sisters, OR
-threshold_tmax      <- 20.0
 threshold_7dadm     <- 20          # HCP (°C)
 
-# Known relationship for estimating Camp Polk flow from the WAS gage when
-# Camp Polk is unavailable: lm(cp_flow ~ was_flow), R² = 0.9908, n = 248.
-# No equivalent regression exists for temperature, so if Camp Polk temp is
-# missing we fall back to the WAS gage's own reading directly (flagged via
-# cp_temp_source so this is traceable in the inputs log).
+# Must match `trend_window` in analysis/rm85-rf-delta.Rmd — the saved models
+# were trained on slopes computed over this many days.
+trend_window        <- 5
+
+# Backup relationships used only when Camp Polk is unavailable. Each is flagged
+# in the inputs log (cp_flow_source / cp_temp_source) so a run that used one is
+# traceable.
+#
+# Flow: lm(cp_flow ~ was_flow) from the WAS gage (14076050),
+# R² = 0.9908, n = 248.
 CP_FROM_WAS_INTERCEPT <- 3.293170
 CP_FROM_WAS_SLOPE     <- 1.026917
+
+# Temperature: lm(camp_polk_daily_max ~ gage_14075000_daily_max), fit on the
+# package's historical records over May-October (the model season) —
+# n = 1,268 days, 2016-2026, R² = 0.9119, RMSE = 1.08 °C. Using the upstream
+# gage's reading directly instead would run ~2.8 °C too cold, so the
+# regression is not optional. Refit these if the historical records are
+# extended substantially.
+CP_FROM_14075000_INTERCEPT <- 1.658134
+CP_FROM_14075000_SLOPE     <- 1.106763
 
 output_dir             <- here("output")
 temp_forecast_log_file <- file.path(output_dir, "instream-forecast-log.csv")
@@ -188,20 +202,28 @@ daily_nws <- function(variable, primary_data, target_date, agg_fn, log_df,
 `%||%` <- function(a, b) if (length(a) == 0 || is.na(a)) b else a
 
 # ── 1. Camp Polk hydrology (OWRD, with WAS backup) ────────────────────────────
-pull_start <- today - 10
+# The 5-day trend features reach back to run date - trend_window, and a 7DADM
+# needs 7 days of daily maxima behind it, so pull far enough to cover both.
+pull_start <- today - (trend_window + 9)
 pull_end   <- today
 
 cp <- get_camp_polk_daily(pull_start, pull_end)
 
-cp_today <- cp$cp_flow |>
-  filter(date == today) |>
-  left_join(cp$cp_tmax, by = "date") |>
-  left_join(select(cp$cp_7dadm, date, cp_7dadm), by = "date")
+cp_at <- function(d) {
+  cp$cp_flow |>
+    filter(date == d) |>
+    left_join(cp$cp_tmax, by = "date") |>
+    left_join(select(cp$cp_7dadm, date, cp_7dadm), by = "date")
+}
 
-cp_yest <- cp$cp_flow |>
-  filter(date == today - 1) |>
-  left_join(cp$cp_tmax, by = "date") |>
-  left_join(select(cp$cp_7dadm, date, cp_7dadm), by = "date")
+cp_today <- cp_at(today)
+cp_yest  <- cp_at(today - 1)
+cp_mw    <- cp_at(today - trend_window)
+
+# Slope over the trend window, run date - 1 back to run date - trend_window.
+# Matches how the delta models were trained (cp_flow_trend / cp_7dadm_trend).
+cp_flow_trend  <- (cp_yest$cp_flow_mean - cp_mw$cp_flow_mean) / (trend_window - 1)
+cp_7dadm_trend <- (cp_yest$cp_7dadm     - cp_mw$cp_7dadm)     / (trend_window - 1)
 
 # ── 2. NWS air temperature & cloud cover (with previous-day fallback) ────────
 nws_log_fallback <- if (file.exists(forecast_log)) {
@@ -235,113 +257,147 @@ all_forecasts <- bind_rows(nws_tmax, nws_tmin, nws_cloud) |>
 
 update_log(all_forecasts, forecast_log)
 
-# ── 3. RM 8.5 lag (dummy: year == 2025 from rm_8_5_historical) ────────────────
-rm85_lag_tmax <- rm_8_5_historical |>
-  filter(statistic == "max", year(date) == 2025,
-         month(date) == month(today), day(date) == day(today)) |>
-  mutate(date = as.Date(date)) |>
-  slice(1)
 
-rm85_lag_dadm <- rm_8_5_historical |>
-  filter(statistic == "7DADM", year(date) == 2025,
-         month(date) == month(today), day(date) == day(today)) |>
-  mutate(date = as.Date(date)) |>
-  slice(1)
+# ── 3. RM 8.5 current state (placeholder — no live source wired in yet) ──────
+# The delta models are anchored on RM 8.5's own observed 7DADM and daily max
+# on the run date (`dadm_m0`, `tmax_m0`) plus their slopes over the last
+# `trend_window` days. This is the one input that has no live feed yet, so
+# until one is connected it is stood in for by the 2025 value on the same
+# calendar day, exactly as the previous version of this script did.
+#
+# Every prediction made from these values is therefore NOT a real forecast, and
+# is labelled "dummy data" in the output log. To go live, replace the body of
+# `get_rm85_observed()` and set `rm85_source` — nothing downstream changes.
+rm85_source <- "dummy_2025"
 
-Tmax_m1 <- if (nrow(rm85_lag_tmax) > 0) rm85_lag_tmax$temperature else NA_real_
-dadm_m1 <- if (nrow(rm85_lag_dadm) > 0) rm85_lag_dadm$temperature else NA_real_
+get_rm85_observed <- function(run_date) {
+  lookup_2025 <- function(stat, d) {
+    d25 <- as.Date(sprintf("2025-%02d-%02d", month(d), day(d)))
+    rm_8_5_historical |>
+      filter(statistic == stat, as.Date(date) == d25) |>
+      slice(1) |>
+      pull(temperature) |>
+      (\(x) if (length(x) == 0) NA_real_ else x)()
+  }
+  list(
+    dadm_m0 = lookup_2025("7DADM", run_date),
+    tmax_m0 = lookup_2025("max",   run_date),
+    dadm_mw = lookup_2025("7DADM", run_date - trend_window),
+    tmax_mw = lookup_2025("max",   run_date - trend_window)
+  )
+}
 
-cat(sprintf("RM 8.5 lag (2025 dummy): Tmax_m1 = %.2f °C,  dadm_m1 = %.2f °C\n", Tmax_m1, dadm_m1))
+rm85 <- get_rm85_observed(today)
 
-# ── 4. Build one full inputs table per lead day (single source of truth) ─────
-build_inputs_row <- function(k) {
-  fdate <- today + k
-  
-  air_max_k    <- daily_nws("maxTemperature", nws_tmax,  fdate,     max,  nws_log_fallback)
-  air_min_k    <- daily_nws("minTemperature", nws_tmin,  fdate,     min,  nws_log_fallback)
-  cloud_k      <- daily_nws("skyCover",       nws_cloud, fdate,     mean, nws_log_fallback)
-  air_max_m1_k <- daily_nws("maxTemperature", nws_tmax,  fdate - 1, max,  nws_log_fallback)
-  air_min_m1_k <- daily_nws("minTemperature", nws_tmin,  fdate - 1, min,  nws_log_fallback)
-  
+dadm_trend <- (rm85$dadm_m0 - rm85$dadm_mw) / trend_window
+tmax_trend <- (rm85$tmax_m0 - rm85$tmax_mw) / trend_window
+
+cat(sprintf("RM 8.5 state (%s): dadm_m0 = %.2f, tmax_m0 = %.2f, dadm_trend = %+.3f, tmax_trend = %+.3f\n",
+            rm85_source, rm85$dadm_m0, rm85$tmax_m0, dadm_trend, tmax_trend))
+
+# ── 4. Forecast trajectory: one NWS value per day for days 1..max lead ───────
+# Built once and sliced per lead below. At lead k the model sees days 1..k.
+max_lead <- max(lead_days_vec)
+
+trajectory <- map_dfr(seq_len(max_lead), function(j) {
+  fdate <- today + j
+  mx <- daily_nws("maxTemperature", nws_tmax,  fdate, max,  nws_log_fallback)
+  mn <- daily_nws("minTemperature", nws_tmin,  fdate, min,  nws_log_fallback)
+  cl <- daily_nws("skyCover",       nws_cloud, fdate, mean, nws_log_fallback)
   tibble(
+    day = j, forecast_date = fdate, julian = yday(fdate),
+    air_max = mx$value, air_max_source = mx$source,
+    air_min = mn$value, air_min_source = mn$source,
+    cloud   = cl$value, cloud_source   = cl$source
+  )
+})
+
+# ── 5. Build one full inputs row per lead (single source of truth) ───────────
+# Column names and order are exactly those the saved models were fit on
+# (see get_model_features() in analysis/rm85-rf-delta.Rmd).
+build_inputs_row <- function(k) {
+  tr <- trajectory |> filter(day <= k)
+
+  base <- tibble(
     run_date       = today,
-    forecast_date  = fdate,
+    forecast_date  = today + k,
     lead_days      = k,
     cp_flow_mean   = cp_today$cp_flow_mean,
-    cp_flow_source = cp$flow_source,
-    cp_tmax        = cp_today$cp_tmax,
-    cp_temp_source = cp$temp_source,
     cp_7dadm       = cp_today$cp_7dadm,
-    Julian         = yday(fdate),
-    air_max        = air_max_k$value,
-    air_max_source = air_max_k$source,
-    air_min        = air_min_k$value,
-    air_min_source = air_min_k$source,
-    cloud_pct      = cloud_k$value,
-    cloud_source   = cloud_k$source,
-    cp_flow_m1     = cp_yest$cp_flow_mean,
-    cp_tmax_m1     = cp_yest$cp_tmax,
-    cp_7dadm_m1    = cp_yest$cp_7dadm,
-    air_max_m1     = air_max_m1_k$value,
-    air_min_m1     = air_min_m1_k$value,
-    Tmax_m1        = Tmax_m1,
-    dadm_m1        = dadm_m1
+    cp_tmax        = cp_today$cp_tmax,
+    cp_flow_trend  = cp_flow_trend,
+    cp_7dadm_trend = cp_7dadm_trend
+  )
+
+  daily <- bind_cols(
+    set_names(as.list(tr$air_max), paste0("air_max_d", tr$day)),
+    set_names(as.list(tr$air_min), paste0("air_min_d", tr$day)),
+    set_names(as.list(tr$cloud),   paste0("cloud_d",   tr$day)),
+    set_names(as.list(tr$julian),  paste0("julian_d",  tr$day))
+  )
+
+  bind_cols(
+    base, daily,
+    tibble(
+      dadm_m0    = rm85$dadm_m0,
+      tmax_m0    = rm85$tmax_m0,
+      dadm_trend = dadm_trend,
+      tmax_trend = tmax_trend,
+      # Shape-of-the-week summaries over days 1..k.
+      traj_air_max_max  = max(tr$air_max),
+      traj_air_max_mean = mean(tr$air_max),
+      traj_air_min_mean = mean(tr$air_min),
+      traj_warming      = tr$air_max[k] - tr$air_max[1],
+      # Provenance, so a bad forecast can be traced to its input.
+      cp_flow_source  = cp$flow_source,
+      cp_temp_source  = cp$temp_source,
+      air_source      = paste(unique(c(tr$air_max_source, tr$air_min_source,
+                                       tr$cloud_source)), collapse = ";"),
+      rm85_source     = rm85_source
+    )
   )
 }
 
 model_inputs <- map_dfr(lead_days_vec, build_inputs_row)
 
-# NEW: running audit log of every input + its source, one row per lead day
+# Running audit log of every input + its source, one row per lead day
 update_log(model_inputs, model_inputs_log_file)
 
-# feat_tmax / feat_7dadm are just the columns each RF model was trained on —
-# derived from model_inputs so there's no duplicated feature-building logic
-feat_tmax_rows <- model_inputs |>
-  select(run_date, forecast_date, lead_days,
-         cp_flow_mean, cp_tmax, Julian, air_max, air_min, cloud_pct,
-         cp_flow_m1, cp_tmax_m1, air_max_m1, air_min_m1, Tmax_m1)
+# ── 6. Predict: model returns the CHANGE from today; add dadm_m0 back ────────
+predict_lead <- function(k) {
+  row   <- model_inputs |> filter(lead_days == k)
+  model <- readRDS(here("output", paste0("rm85_rf_7dadm_delta_lead", k, ".rds")))
 
-feat_7dadm_rows <- model_inputs |>
-  select(run_date, forecast_date, lead_days,
-         cp_flow_mean, cp_7dadm, Julian, air_max, air_min, cloud_pct,
-         cp_flow_m1, cp_7dadm_m1, air_max_m1, air_min_m1, dadm_m1)
+  # randomForest rejects NA predictors outright. A missing input (e.g. NWS
+  # horizon too short for the last lead) should cost one lead, not the run.
+  feats <- names(model$forest$xlevels)
+  x     <- row[, feats, drop = FALSE]
+  miss  <- feats[map_lgl(x, ~ anyNA(.x))]
 
-#update_log(feat_tmax_rows, feat_tmax_log_file)
-#update_log(feat_7dadm_rows, feat_7dadm_log_file)
+  if (length(miss) > 0) {
+    message(sprintf("Lead %d skipped — missing inputs: %s", k, paste(miss, collapse = ", ")))
+    return(tibble(run_date = today, forecast_date = today + k, lead_days = k,
+                  dadm_m0 = row$dadm_m0, pred_change_C = NA_real_,
+                  pred_7dadm_C = NA_real_,
+                  note = paste("skipped, missing:", paste(miss, collapse = ", "))))
+  }
 
-# ── 5. Predict across all lead days ───────────────────────────────────────────
-results_list <- map(feat_tmax_rows$lead_days, function(k) {
-  fdate <- today + k
-  
-  rf_tmax  <- readRDS(here("output", paste0("rm85_rf_tmax_lead",  k, ".rds")))
-  rf_7dadm <- readRDS(here("output", paste0("rm85_rf_7dadm_lead", k, ".rds")))
-  
-  feat_tmax_x  <- feat_tmax_rows  |> filter(lead_days == k) |> select(-run_date, -forecast_date, -lead_days)
-  feat_7dadm_x <- feat_7dadm_rows |> filter(lead_days == k) |> select(-run_date, -forecast_date, -lead_days)
-  
-  actual_tmax <- rm_8_5_historical |>
-    filter(statistic == "max", year(date) == 2025,
-           month(date) == month(fdate), day(date) == day(fdate)) |>
-    pull(temperature)
-  
-  actual_dadm <- rm_8_5_historical |>
-    filter(statistic == "7DADM", year(date) == 2025,
-           month(date) == month(fdate), day(date) == day(fdate)) |>
-    pull(temperature)
-  
+  change <- predict(model, x)
+
   tibble(
-    run_date       = today,
-    forecast_date  = fdate,
-    lead_days      = k,
-    pred_tmax_C    = round(predict(rf_tmax,  feat_tmax_x),  2),
-    pred_7dadm_C   = round(predict(rf_7dadm, feat_7dadm_x), 2),
-    note = "dummy data"
+    run_date      = today,
+    forecast_date = today + k,
+    lead_days     = k,
+    dadm_m0       = round(row$dadm_m0, 2),
+    pred_change_C = round(as.numeric(change), 2),
+    pred_7dadm_C  = round(row$dadm_m0 + as.numeric(change), 2),
+    note          = if (rm85_source == "dummy_2025") "dummy data" else NA_character_
   )
-})
+}
 
-results <- bind_rows(results_list)
+results <- map_dfr(lead_days_vec, predict_lead)
 
 print(results, n = Inf)
 
-# ── 6. Append instream forecast to cumulative log ─────────────────────────────
+# ── 7. Append instream forecast to cumulative log ─────────────────────────────
 update_log(results, temp_forecast_log_file)
