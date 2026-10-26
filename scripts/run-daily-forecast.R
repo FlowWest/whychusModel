@@ -12,15 +12,18 @@
 # those first (or `git pull` whychusData) and then:
 #   Rscript scripts/run-daily-forecast.R
 #
-# Both logs began life as the old model-inputs-log.csv and
-# instream-forecast-log.csv, and those rows are kept as they were. The delta
-# model's inputs cannot be expressed in the old fixed-column layout (it uses
-# 17-41 lead-dependent predictors), so new rows ADD columns to the right of the
-# old ones instead of replacing them. Columns the two generations share
-# (run_date, forecast_date, lead_days, cp_flow_mean, cp_tmax, cp_7dadm, the
-# *_source columns, pred_7dadm_C, note) mean the same thing in both; columns
-# only one generation has are blank in the other's rows (e.g. pred_tmax_C,
-# which the delta models do not produce).
+# model_inputs.csv holds ONLY the delta model's structure: one row per lead per
+# run, with the columns of get_model_features() in analysis/rm85-rf-delta.Rmd
+# plus run identifiers and provenance. Lead k uses days 1..k, so the *_d1..d7
+# columns are blank where a lead does not reach that day (lead 3 has no d4-d7).
+# If the model's feature set changes, update the column layout below.
+#
+# model_outputs.csv still begins with the rows of the old
+# instream-forecast-log.csv (the earlier absolute-value models, marked
+# note = "dummy data"). New rows add columns to the right of the old ones
+# (dadm_m0, pred_change_C, source columns); columns only one generation has are
+# blank in the other's rows, e.g. pred_tmax_C, which the delta models do not
+# produce.
 .libPaths(c(Sys.getenv("R_LIBS_USER"), .libPaths()))
 library(tidyverse)
 library(lubridate)
@@ -41,11 +44,6 @@ trend_window <- 5
 
 # RM 8.5 logger readings in hydro_vu.csv: parameter 1 is water temperature (°C).
 hv_temp_parameter_id <- "1"
-# A day's max is only trusted if it has at least this many readings. The logger
-# reports hourly, and the run happens in the evening, so a complete past day
-# has 24 and today has ~19-20; a thin day (logger outage, or the partial first
-# day of a fresh pull) would otherwise understate the max.
-hv_min_readings <- 18
 
 input_files <- list(
   camp_polk = file.path(DATA_INPUT_DIR, "camp_polk.csv"),
@@ -98,8 +96,10 @@ if (n_distinct(hv$location_id) > 1) {
 rm85_daily <- hv |>
   mutate(date = as.Date(timestamp, tz = TZ_PACIFIC)) |>
   group_by(date) |>
+  # A day's max uses whatever readings exist for it, however few: a day with
+  # any reading counts. A thin day can understate its max, which is why the
+  # reading count is kept (see rm85_readings_today).
   summarise(n_readings = n(), tmax = max(value, na.rm = TRUE), .groups = "drop") |>
-  mutate(tmax = if_else(n_readings >= hv_min_readings, tmax, NA_real_)) |>
   # Insert absent days so a gap breaks the rolling mean instead of being skipped.
   complete(date = seq(min(date), max(date), by = "day")) |>
   arrange(date) |>
@@ -122,8 +122,9 @@ dadm_trend <- (rm85$dadm_m0 - rm85$dadm_mw) / trend_window
 tmax_trend <- (rm85$tmax_m0 - rm85$tmax_mw) / trend_window
 
 # Provenance for the RM 8.5 inputs, logged on every row of model_inputs.csv. A
-# NA dadm_m0 is usually explained by a low reading count on the run date (a
-# stalled HydroVu feed), which is invisible in the numbers themselves.
+# low reading count on the run date means dadm_m0 / tmax_m0 rest on a partial
+# day (a stalled HydroVu feed, or an early run), which the numbers themselves
+# don't show.
 rm85_readings_today <- {
   n <- rm85_val("n_readings", today)
   if (is.na(n)) 0L else as.integer(n)
@@ -226,6 +227,28 @@ build_inputs_row <- function(k) {
 }
 
 model_inputs <- map_dfr(lead_days_vec, build_inputs_row)
+
+# Fixed, grouped column layout. Left to itself, bind_rows() orders columns by
+# first appearance across leads, which scatters d1..d7 around the provenance
+# columns.
+model_inputs_cols <- c(
+  "run_date", "forecast_date", "lead_days",
+  # Camp Polk
+  "cp_flow_mean", "cp_7dadm", "cp_tmax", "cp_flow_trend", "cp_7dadm_trend",
+  # NWS forecast trajectory, days 1..max lead
+  paste0("air_max_d", seq_len(max_lead)), paste0("air_min_d", seq_len(max_lead)),
+  paste0("cloud_d",   seq_len(max_lead)), paste0("julian_d", seq_len(max_lead)),
+  # RM 8.5 current state
+  "dadm_m0", "tmax_m0", "dadm_trend", "tmax_trend",
+  # Trajectory summaries
+  "traj_air_max_max", "traj_air_max_mean", "traj_air_min_mean", "traj_warming",
+  # Provenance
+  "cp_flow_source", "cp_temp_source", "air_max_source", "air_min_source",
+  "cloud_source", "rm85_source", "rm85_readings_today"
+)
+stopifnot("model_inputs has columns missing from model_inputs_cols" =
+            all(names(model_inputs) %in% model_inputs_cols))
+model_inputs <- select(model_inputs, any_of(model_inputs_cols))
 
 # Audit log of every input and its source, one row per lead per run.
 update_log(model_inputs, model_inputs_file)

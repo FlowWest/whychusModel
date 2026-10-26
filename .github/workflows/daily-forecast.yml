@@ -30,34 +30,54 @@ jobs:
           ref: main
           path: whychusData
           token: ${{ secrets.WHYCHUS_DATA_TOKEN }}
+          # Enough history to see today's commits (see the check below).
+          fetch-depth: 30
 
-      # Two crons fire an hour apart so one lands at 8 pm Pacific on either side
-      # of daylight saving. A day counts as done only if at least one lead
-      # produced a forecast: a run that skipped every lead (e.g. the logger feed
-      # was late at 7 pm in winter) must not block the retry an hour later.
-      # Rows for the same date are replaced, not duplicated, when it re-runs.
-      - name: Check if today's forecast already ran
+      # MANUAL runs (Run workflow button / gh workflow run) ALWAYS run, so the
+      # workflow can be tested any number of times during the day. They are
+      # committed as "[manual]" and never count as the day's forecast.
+      #
+      # SCHEDULED runs are the evening forecast that matters. Two crons fire an
+      # hour apart so one lands at 8 pm Pacific on either side of daylight
+      # saving; the later one skips only if an earlier SCHEDULED run already
+      # committed a completed forecast today. Test runs (and the rows they
+      # wrote) therefore never block the evening run, which replaces whatever
+      # the day's rows held. "Completed" means at least one lead produced a
+      # forecast, so a scheduled run that skipped every lead is retried.
+      - name: Decide whether to run
         id: check_dedupe
         run: |
           today=$(TZ='America/Los_Angeles' date +%F)
-          log_file="whychusData/output/model_outputs.csv"
-          done=false
-          if [ -f "$log_file" ]; then
-            # pred_7dadm_C is located by name. It comes before the free-text
-            # `note` column (the only one that can contain commas), so plain
-            # comma-splitting is safe for the fields read here.
-            if awk -F, -v d="$today" '
-                 NR == 1 { for (i = 1; i <= NF; i++) if ($i == "pred_7dadm_C") c = i; next }
-                 c && $1 == d && $c != "" && $c != "NA" { found = 1 }
-                 END { exit !found }' "$log_file"; then
-              done=true
-            fi
+          event="${{ github.event_name }}"
+
+          if [ "$event" != "schedule" ]; then
+            echo "Manual run ($event) — always runs; does not count as the evening forecast."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          if [ "$done" = true ]; then
-            echo "Forecast for $today already logged — skipping duplicate run."
+
+          # An earlier scheduled run today that pushed a commit.
+          scheduled_commits=$(git -C whychusData log -30 --format=%s \
+            | grep -c "^chore: daily data and forecast $today \[scheduled\]" || true)
+
+          # ...and that commit's forecast has at least one lead with a value.
+          # pred_7dadm_C is located by name. It comes before the free-text
+          # `note` column (the only one that can contain commas), so plain
+          # comma-splitting is safe for the fields read here.
+          has_forecast=false
+          log_file="whychusData/output/model_outputs.csv"
+          if [ -f "$log_file" ] && awk -F, -v d="$today" '
+               NR == 1 { for (i = 1; i <= NF; i++) if ($i == "pred_7dadm_C") c = i; next }
+               c && $1 == d && $c != "" && $c != "NA" { found = 1 }
+               END { exit !found }' "$log_file"; then
+            has_forecast=true
+          fi
+
+          if [ "$scheduled_commits" -gt 0 ] && [ "$has_forecast" = true ]; then
+            echo "Scheduled forecast for $today already committed — skipping duplicate run."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No completed forecast for $today yet — proceeding with today's date: $today"
+            echo "No completed scheduled forecast for $today yet — running."
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Set up R
@@ -145,6 +165,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add input output
-          git diff --staged --quiet || git commit -m "chore: daily data and forecast $(TZ='America/Los_Angeles' date +%F)"
+          # The [scheduled] / [manual] marker is what the "Decide whether to
+          # run" step reads to tell the evening run from a test run.
+          trigger=$([ "${{ github.event_name }}" = "schedule" ] && echo scheduled || echo manual)
+          git diff --staged --quiet || git commit -m "chore: daily data and forecast $(TZ='America/Los_Angeles' date +%F) [$trigger]"
           git pull --rebase
           git push
