@@ -259,8 +259,8 @@
 #' HydroVu locations lookup
 #'
 #' Locations visible to the HydroVu account, for resolving \code{location_id}
-#' in the HydroVu readings stored at \code{data-live/hv_data.Rds} on the
-#' \code{data} branch.
+#' in the HydroVu readings stored at \code{data/hv_data.csv} in the
+#' whychusData repo.
 #'
 #' @format A data frame with columns:
 #' \describe{
@@ -278,8 +278,8 @@
 #' HydroVu parameters lookup
 #'
 #' All HydroVu parameter friendly-names, for resolving \code{parameter_id} in
-#' the HydroVu readings stored at \code{data-live/hv_data.Rds} on the
-#' \code{data} branch.
+#' the HydroVu readings stored at \code{data/hv_data.csv} in the
+#' whychusData repo.
 #'
 #' @format A data frame with columns:
 #' \describe{
@@ -294,7 +294,7 @@
 #' HydroVu units lookup
 #'
 #' All HydroVu unit friendly-names, for resolving \code{unit_id} in the HydroVu
-#' readings stored at \code{data-live/hv_data.Rds} on the \code{data} branch.
+#' readings stored at \code{data/hv_data.csv} in the whychusData repo.
 #'
 #' @format A data frame with columns:
 #' \describe{

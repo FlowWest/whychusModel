@@ -8,8 +8,10 @@ on:
     - cron: "10 15 * * *"
   workflow_dispatch:
 
+# Data is committed to the whychusData repo with WHYCHUS_DATA_TOKEN, so this
+# repo only needs read access
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: hydrovu-pull-lock
@@ -39,11 +41,22 @@ jobs:
           echo "Not at the schedule time in PT. Skipping scheduled run."
           exit 0
 
-      - name: Checkout data branch
+      # Code and data are checked out side by side, matching the local layout
+      # that scripts/hydrovu_config.R expects (../whychusData/data)
+      - name: Checkout code
         if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
         uses: actions/checkout@v4
         with:
-          ref: data
+          path: whychusModel
+
+      - name: Checkout data repo
+        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/whychusData
+          ref: main
+          path: whychusData
+          token: ${{ secrets.WHYCHUS_DATA_TOKEN }}
           persist-credentials: true
 
       - name: Set up R
@@ -58,6 +71,7 @@ jobs:
         if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
+          working-directory: whychusModel
           packages: |
             github::FlowWest/rhydrovu
             here
@@ -67,6 +81,7 @@ jobs:
 
       - name: Fetch HydroVu data
         if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
+        working-directory: whychusModel
         env:
           HYDROVU_CLIENT_ID: ${{ secrets.HYDROVU_CLIENT_ID }}
           HYDROVU_CLIENT_SECRET: ${{ secrets.HYDROVU_CLIENT_SECRET }}
@@ -75,15 +90,16 @@ jobs:
 
       - name: Commit updated data
         if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
+        working-directory: whychusData
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add data-live/hv_data.Rds
-          git commit -m "Daily HydroVu refresh" || echo "No changes"
+          git add data/hv_data.csv
+          git commit -m "HydroVu refresh" || { echo "No changes"; exit 0; }
 
           for i in 1 2 3 4 5; do
-            git push origin HEAD:data && break
-            echo "Push rejected (attempt $i/5) - rebasing onto latest data branch and retrying"
-            git fetch origin data
-            git rebase origin/data
+            git push origin HEAD:main && exit 0
+            echo "Push rejected (attempt $i/5) - rebasing onto latest main and retrying"
+            git pull --rebase origin main
           done
+          exit 1

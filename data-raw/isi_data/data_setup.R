@@ -1,8 +1,8 @@
 # data-raw/isi_data/data_setup.R
-# One-time setup: seed data-live/hv_data.Rds from an isi-data.com CSV export
-# for Whychus Creek RM 8.5, then backfill from HydroVu so the scheduled refresh
-# (scripts/fetch_hydrovu.R) picks up where this leaves off. Run on the `data`
-# branch and commit the resulting .Rds there.
+# One-time setup: seed hv_data.csv (HV_DATA_FILE, in the whychusData repo)
+# from an isi-data.com CSV export for Whychus Creek RM 8.5, then backfill from
+# HydroVu so the scheduled refresh (scripts/fetch_hydrovu.R) picks up where
+# this leaves off. Commit the resulting CSV to whychusData.
 
 library(rhydrovu)
 library(dplyr)
@@ -66,10 +66,11 @@ message("Seed: ", nrow(seed), " records from CSV; HydroVu: ", nrow(hv_data), " r
 
 ## SAVE ========================================================================
 
+# Time order, matching how fetch_hydrovu.R appends new readings
 combined <- hv_append(seed, hv_data) |>
-  arrange(location_id, parameter_id, timestamp)
+  arrange(timestamp, location_id, parameter_id)
 
 dir.create(dirname(HV_DATA_FILE), showWarnings = FALSE)
-saveRDS(combined, HV_DATA_FILE)
+hv_write_csv(combined, HV_DATA_FILE)
 
 message("Saved ", nrow(combined), " total records to ", HV_DATA_FILE)

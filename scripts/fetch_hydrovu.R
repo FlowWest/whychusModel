@@ -1,4 +1,12 @@
 # scripts/fetch_hydrovu.R
+# Appends new HydroVu readings to hv_data.csv in the whychusData repo (see
+# HV_DATA_FILE in hydrovu_config.R). Existing rows stay in place and new
+# readings go at the bottom, so each refresh commits as a block of added lines.
+#
+# Run daily by .github/workflows/hydrovu_refresh.yml. To run locally:
+#   cd ../whychusData && git pull
+#   Rscript scripts/fetch_hydrovu.R
+#   cd ../whychusData && git add data && git commit -m "HydroVu refresh" && git push
 library(rhydrovu)
 library(dplyr)
 library(lubridate)
@@ -26,7 +34,7 @@ START_FRESH <- FALSE
 # hv_validate_readings() projects onto the rhydrovu schema columns
 existing_data <- if (file.exists(DATA_FILE) && !START_FRESH) {
   message("Loading existing dataset.")
-  readRDS(DATA_FILE) |>
+  hv_read_csv(DATA_FILE) |>
     hv_validate_readings()
 } else {
   message("No existing dataset loaded.")
@@ -64,10 +72,12 @@ message("Loaded ", nrow(new_data), " new records.")
 
 ## APPEND + SAVE ===============================================================
 
-combined <- hv_append(existing_data, new_data) |>
-  arrange(location_id, parameter_id, timestamp)
+# Existing rows keep their position (revised values update in place); new
+# readings are appended in time order
+combined <- hv_append(existing_data, new_data, order = "append")
 
 dir.create(dirname(DATA_FILE), showWarnings = FALSE)
-saveRDS(combined, DATA_FILE)
+hv_write_csv(combined, DATA_FILE)
 
-message("Saved ", nrow(combined), " total records.")
+message("Saved ", nrow(combined), " total records (",
+        nrow(combined) - NROW(existing_data), " added).")

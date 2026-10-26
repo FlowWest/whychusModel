@@ -5,10 +5,19 @@
 # HydroVu locations to pull (names as in hv_locations(con))
 HV_LOCATIONS <- c("Whychus Creek RM 8.5")
 
-# Readings are stored in the rhydrovu schema (location_id, parameter_id,
+# Readings live in the separate whychusData repo (data/ folder, main branch),
+# expected to be cloned next to this repo; set WHYCHUS_DATA_DIR to override.
+# They are stored as CSV in the rhydrovu schema (location_id, parameter_id,
 # unit_id, timestamp, value); resolve names with the hydrovu_locations,
 # hydrovu_parameters and hydrovu_units package datasets.
-HV_DATA_FILE <- here::here("data-live", "hv_data.Rds")
+HV_DATA_DIR <- Sys.getenv("WHYCHUS_DATA_DIR",
+                          file.path(dirname(here::here()), "whychusData", "data"))
+HV_DATA_FILE <- file.path(HV_DATA_DIR, "hv_data.csv")
+
+if (!dir.exists(dirname(HV_DATA_DIR))) {
+  stop("whychusData repo not found at ", normalizePath(dirname(HV_DATA_DIR), mustWork = FALSE),
+       "; clone it next to whychusModel or set WHYCHUS_DATA_DIR.", call. = FALSE)
+}
 
 # The device logs in local clock time, which HydroVu returns as UTC epochs
 # (e.g. a 12:00 PDT reading comes back as 12:00 UTC). Timestamps are corrected

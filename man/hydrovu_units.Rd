@@ -20,6 +20,6 @@ hydrovu_units
 }
 \description{
 All HydroVu unit friendly-names, for resolving \code{unit_id} in the HydroVu
-readings stored at \code{data-live/hv_data.Rds} on the \code{data} branch.
+readings stored at \code{data/hv_data.csv} in the whychusData repo.
 }
 \keyword{datasets}
