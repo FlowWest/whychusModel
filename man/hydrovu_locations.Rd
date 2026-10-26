@@ -23,7 +23,7 @@ hydrovu_locations
 }
 \description{
 Locations visible to the HydroVu account, for resolving \code{location_id}
-in the HydroVu readings stored at \code{data/hv_data.csv} in the
+in the HydroVu readings stored at \code{input/hv_data.csv} in the
 whychusData repo.
 }
 \keyword{datasets}

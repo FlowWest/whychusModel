@@ -5,13 +5,13 @@
 # HydroVu locations to pull (names as in hv_locations(con))
 HV_LOCATIONS <- c("Whychus Creek RM 8.5")
 
-# Readings live in the separate whychusData repo (data/ folder, main branch),
+# Readings live in the separate whychusData repo (input/ folder, main branch),
 # expected to be cloned next to this repo; set WHYCHUS_DATA_DIR to override.
 # They are stored as CSV in the rhydrovu schema (location_id, parameter_id,
 # unit_id, timestamp, value); resolve names with the hydrovu_locations,
 # hydrovu_parameters and hydrovu_units package datasets.
 HV_DATA_DIR <- Sys.getenv("WHYCHUS_DATA_DIR",
-                          file.path(dirname(here::here()), "whychusData", "data"))
+                          file.path(dirname(here::here()), "whychusData", "input"))
 HV_DATA_FILE <- file.path(HV_DATA_DIR, "hv_data.csv")
 
 if (!dir.exists(dirname(HV_DATA_DIR))) {

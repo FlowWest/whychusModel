@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # whychusData is checked out inside the workspace; see scripts/hydrovu_config.R
-      WHYCHUS_DATA_DIR: ${{ github.workspace }}/whychusData/data
+      WHYCHUS_DATA_DIR: ${{ github.workspace }}/whychusData/input
     steps:
       - name: Check schedule against time zone
         id: ptcheck
@@ -82,7 +82,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/hv_data.csv
+          git add input/hv_data.csv
           git diff --staged --quiet && { echo "No new HydroVu data."; exit 0; }
           git commit -m "chore: hydrovu data $(date -u +%Y-%m-%d)"
           git pull --rebase

@@ -7,7 +7,7 @@
 # Run daily by .github/workflows/hydrovu_refresh.yml. To run locally:
 #   cd ../whychusData && git pull
 #   Rscript scripts/fetch_hydrovu.R
-#   cd ../whychusData && git add data && git commit -m "HydroVu refresh" && git push
+#   cd ../whychusData && git add input && git commit -m "HydroVu refresh" && git push
 library(rhydrovu)
 library(dplyr)
 library(lubridate)
