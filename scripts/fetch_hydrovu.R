@@ -4,7 +4,7 @@
 # refresh mostly commits as a block of lines added at the bottom; late readings
 # are inserted at their place in time.
 #
-# Run daily by .github/workflows/hydrovu_refresh.yml. To run locally:
+# Run daily by .github/workflows/daily-forecast.yml. To run locally:
 #   cd ../whychusData && git pull
 #   Rscript scripts/fetch_hydrovu.R
 #   cd ../whychusData && git add input && git commit -m "HydroVu refresh" && git push
