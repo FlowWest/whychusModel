@@ -1,105 +1,89 @@
 name: HydroVu Daily Refresh
-
 on:
   schedule:
     # 7:XXam Pacific = 14:XX UTC (standard), 15:XX UTC (DST)
-    # Run twice; script enforces PT time window
-    - cron: "10 14 * * *"
-    - cron: "10 15 * * *"
+    # Run twice; job checks the PT hour and skips the other run
+    - cron: '10 14 * * *'
+    - cron: '10 15 * * *'
   workflow_dispatch:
-
-# Data is committed to the whychusData repo with WHYCHUS_DATA_TOKEN, so this
+# Data is pushed to the whychusData repo with WHYCHUS_DATA_TOKEN, so this
 # repo only needs read access
 permissions:
   contents: read
-
 concurrency:
   group: hydrovu-pull-lock
   cancel-in-progress: false
-
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    environment: hydrovu
-
+    env:
+      # whychusData is checked out inside the workspace; see scripts/hydrovu_config.R
+      WHYCHUS_DATA_DIR: ${{ github.workspace }}/whychusData/data
     steps:
       - name: Check schedule against time zone
         id: ptcheck
-        if: github.event_name == 'schedule'
         run: |
-          PT_HOUR=$(TZ=America/Los_Angeles date +'%H')
-
-          if [ "$PT_HOUR" = "07" ]; then
-            echo "run_job=true" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" != "schedule" ] || [ "$(TZ='America/Los_Angeles' date +%H)" = "07" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           else
-            echo "run_job=false" >> $GITHUB_OUTPUT
+            echo "Not 7am Pacific — skipping this scheduled run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Skip if not correct scheduled time
-        if: github.event_name == 'schedule' && steps.ptcheck.outputs.run_job != 'true'
-        run: |
-          echo "Not at the schedule time in PT. Skipping scheduled run."
-          exit 0
-
-      # Code and data are checked out side by side, matching the local layout
-      # that scripts/hydrovu_config.R expects (../whychusData/data)
-      - name: Checkout code
-        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        if: steps.ptcheck.outputs.skip == 'false'
+        uses: actions/checkout@v6
         with:
-          path: whychusModel
-
-      - name: Checkout data repo
-        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
-        uses: actions/checkout@v4
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout whychusData
+        if: steps.ptcheck.outputs.skip == 'false'
+        uses: actions/checkout@v6
         with:
-          repository: ${{ github.repository_owner }}/whychusData
+          repository: FlowWest/whychusData
           ref: main
           path: whychusData
           token: ${{ secrets.WHYCHUS_DATA_TOKEN }}
-          persist-credentials: true
-
       - name: Set up R
-        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
+        if: steps.ptcheck.outputs.skip == 'false'
         uses: r-lib/actions/setup-r@v2
-
-      - name: Install system deps
-        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
-        run: sudo apt-get install -y libcurl4-openssl-dev
-
-      - name: Install R packages
-        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
-        uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          working-directory: whychusModel
-          packages: |
-            github::FlowWest/rhydrovu
-            here
-            dplyr
-            tibble
-            lubridate
-
+          r-version: '4.4'
+          use-public-rspm: true
+      - name: Install system libraries
+        if: steps.ptcheck.outputs.skip == 'false'
+        run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+      - name: Install pak
+        if: steps.ptcheck.outputs.skip == 'false'
+        run: Rscript -e 'install.packages("pak", repos = "https://cloud.r-project.org")'
+      - name: Cache R packages
+        if: steps.ptcheck.outputs.skip == 'false'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.R_LIBS_USER }}
+          key: r-4.4-hydrovu-v1-${{ hashFiles('DESCRIPTION') }}
+          restore-keys: r-4.4-hydrovu-v1-
+      - name: Install dependencies
+        if: steps.ptcheck.outputs.skip == 'false'
+        run: |
+          Rscript -e '
+            pak::pak(c(
+              "FlowWest/rhydrovu", "dplyr", "tibble", "lubridate", "here"
+            ))
+          '
       - name: Fetch HydroVu data
-        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
-        working-directory: whychusModel
+        if: steps.ptcheck.outputs.skip == 'false'
         env:
           HYDROVU_CLIENT_ID: ${{ secrets.HYDROVU_CLIENT_ID }}
           HYDROVU_CLIENT_SECRET: ${{ secrets.HYDROVU_CLIENT_SECRET }}
-        run: |
-          Rscript scripts/fetch_hydrovu.R
-
-      - name: Commit updated data
-        if: github.event_name != 'schedule' || steps.ptcheck.outputs.run_job == 'true'
+        run: Rscript scripts/fetch_hydrovu.R
+      - name: Commit and push to whychusData
+        if: steps.ptcheck.outputs.skip == 'false'
         working-directory: whychusData
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/hv_data.csv
-          git commit -m "HydroVu refresh" || { echo "No changes"; exit 0; }
-
-          for i in 1 2 3 4 5; do
-            git push origin HEAD:main && exit 0
-            echo "Push rejected (attempt $i/5) - rebasing onto latest main and retrying"
-            git pull --rebase origin main
-          done
-          exit 1
+          git diff --staged --quiet && { echo "No new HydroVu data."; exit 0; }
+          git commit -m "chore: hydrovu data $(date -u +%Y-%m-%d)"
+          git pull --rebase
+          git push
