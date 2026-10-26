@@ -26,6 +26,14 @@ jobs:
             echo "No forecast for $today yet — proceeding with today's date: $today"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Checkout whychusData
+        if: steps.check_dedupe.outputs.skip == 'false'
+        uses: actions/checkout@v6
+        with:
+          repository: FlowWest/whychusData
+          ref: main
+          path: whychusData
+          token: ${{ secrets.WHYCHUS_DATA_TOKEN }}
       - name: Set up R
         if: steps.check_dedupe.outputs.skip == 'false'
         uses: r-lib/actions/setup-r@v2
@@ -52,7 +60,8 @@ jobs:
           Rscript -e '
             pak::pak(c(
               "tidyverse", "lubridate", "randomForest", "zoo",
-              "httr", "httr2", "rvest", "janitor", "readr", "here"
+              "httr", "httr2", "rvest", "janitor", "readr", "here",
+              "FlowWest/rhydrovu"
             ))
           '
       - name: Install whychusModel package
@@ -77,6 +86,28 @@ jobs:
           curl -v -A "Mozilla/5.0" \
             "https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/" \
             -o /dev/null -w "\nHTTP status: %{http_code}\n" || true
+
+      # HydroVu failures are reported on the step but don't block the forecast
+      - name: Fetch HydroVu data
+        id: hydrovu
+        if: steps.check_dedupe.outputs.skip == 'false'
+        continue-on-error: true
+        env:
+          HYDROVU_CLIENT_ID: ${{ secrets.HYDROVU_CLIENT_ID }}
+          HYDROVU_CLIENT_SECRET: ${{ secrets.HYDROVU_CLIENT_SECRET }}
+          WHYCHUS_DATA_DIR: ${{ github.workspace }}/whychusData/input
+        run: Rscript scripts/fetch_hydrovu.R
+      - name: Commit and push HydroVu data
+        if: steps.check_dedupe.outputs.skip == 'false' && steps.hydrovu.outcome == 'success'
+        continue-on-error: true
+        working-directory: whychusData
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add input/hv_data.csv
+          git diff --staged --quiet || git commit -m "chore: hydrovu data $(date -u +%Y-%m-%d)"
+          git pull --rebase
+          git push
 
       - name: Run daily forecast
         if: steps.check_dedupe.outputs.skip == 'false'
