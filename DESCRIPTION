@@ -1,14 +1,24 @@
 Package: whychusModel
 Title: Input Data and Parameters for the Whychus Basin Model
 Version: 0.1.0
-Authors@R: 
+Authors@R:
     person("Maddee", "Wiggins", , "mrubenson@flowwest.com", role = c("aut", "cre"))
 Description: Provides input datasets, parameters, and helper functions
     for the Whychus Creek temperature forecasting
 License: MIT + file LICENSE
+URL: https://flowwest.github.io/udwc_temperature/,
+    https://github.com/FlowWest/udwc_temperature
+BugReports: https://github.com/FlowWest/udwc_temperature/issues
 Encoding: UTF-8
 LazyData: true
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.3
-Depends: 
+Depends:
     R (>= 3.5)
+Suggests:
+    dplyr,
+    ggplot2,
+    knitr,
+    rmarkdown,
+    tidyr
+VignetteBuilder: knitr

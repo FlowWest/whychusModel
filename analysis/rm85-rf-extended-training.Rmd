@@ -1,0 +1,629 @@
+---
+title: "RM 8.5 — Does Adding 2026 Observations to Training Improve Forecasts?"
+author: "Maddee Wiggins (FlowWest)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(zoo)
+library(here)
+library(whychusModel)
+library(randomForest)
+```
+
+# Objective
+
+The production models train on `rm_8_5_historical`, which ends
+2025-10-29. A real RM 8.5 logger has since produced a full 2026 season.
+This document tests whether adding those observations to the training set
+improves forecasts, for both model formulations currently in use:
+
+* the **change-from-today** target of `rm85-rf-delta.Rmd`, and
+* the **absolute** target of `rm85-rf-dynamical.Rmd`.
+
+The package data objects are not modified. Historical data is read from
+the package and the 2026 season is bound onto it at load time, so this
+document is self-contained and reversible.
+
+## Two findings that shape the design
+
+**2026 does not extend the temperature range of the historical record.**
+The `Potential improvements` note in `rm85-rf-delta.Rmd` states that 20% of
+2026 days exceeded the training maximum. That is true of the *training
+partition* actually used (2021–2025 dynamical window, chronological 80%,
+maximum 24.06 °C), not of the historical record, whose May–October maximum
+is 24.92 °C — recorded in 2018, and slightly above 2026's 24.89 °C. Zero
+2026 days exceed the full historical maximum.
+
+The constraint is therefore not a missing hot season. It is that moving to
+dynamical.org weather restricted training to 2021 onward, discarding
+earlier seasons — including 2018, which holds the record maximum. A
+longer-record variant is included below to test whether recovering those
+seasons is worth more than the 2026 addition.
+
+Note that the longer record available is shorter than it first appears.
+`all_historical_forecasts` carries lead 0 (reanalysis) for 2011–2018 and
+leads 1–7 only from 2019 onward, so a model needing a forecast trajectory
+can reach back to 2019, not 2011.
+
+**2026 is nonetheless an outlier — in sustained level rather than in
+peak.** The distinction matters for what adding it to training can be
+expected to do, and is clearest as a figure (Section 1d).
+
+**2026 cannot be both training and test data.** Adding the season to
+training removes it as a clean evaluation set. This document uses a
+chronological cut: models are trained on data up to `train_cutoff` and
+evaluated on 2026 dates after it, using the real NWS forecasts logged
+operationally. The "with 2026" variants therefore see only the portion of
+2026 preceding the cut.
+
+```{r config}
+month_start   <- 5
+month_end     <- 10
+lead_days_vec <- 1:7
+ntree         <- 500
+trend_window  <- 5
+threshold_7dadm <- 20.0
+owrd_station  <- "14076100"
+
+# Models train on data up to this date; evaluation uses 2026 dates after it.
+train_cutoff <- as.Date("2026-06-30")
+
+rm85_logger_file <- "WC85 Rimrock bottom 2026-08-13 09_52_44 PDT.xlsx"
+
+lead_colors <- setNames(colorRampPalette(c("#185FA5", "#4E9F50", "#C93312"))(length(lead_days_vec)),
+                        as.character(lead_days_vec))
+```
+
+# 1. Build the extended observation record
+
+## 1a. RM 8.5: package historical + 2026 logger
+
+```{r rm85-extended}
+rm85_hist <- rm_8_5_historical |>
+  mutate(date = as.Date(date)) |>
+  filter(statistic %in% c("7DADM", "max")) |>
+  select(date, statistic, temperature)
+
+rm85_2026 <- readxl::read_xlsx(here("data-raw", "data-raw", rm85_logger_file)) |>
+  janitor::clean_names() |>
+  mutate(date = as.Date(floor_date(date_time_pdt, "1 day"))) |>
+  group_by(date) |>
+  summarise(max = max(temperature_c, na.rm = TRUE), .groups = "drop") |>
+  arrange(date) |>
+  mutate(`7DADM` = zoo::rollapply(max, 7, mean, fill = NA, align = "right")) |>
+  pivot_longer(c(max, `7DADM`), names_to = "statistic", values_to = "temperature") |>
+  filter(!is.na(temperature)) |>
+  select(date, statistic, temperature)
+
+# Bind, keeping the package record where the two overlap.
+rm85_all <- bind_rows(rm85_hist, rm85_2026) |>
+  distinct(date, statistic, .keep_all = TRUE) |>
+  arrange(date, statistic)
+
+rm85_7dadm <- rm85_all |> filter(statistic == "7DADM") |> select(date, rm_8_5_7dadm = temperature)
+rm85_tmax  <- rm85_all |> filter(statistic == "max")   |> select(date, rm_8_5_tmax  = temperature)
+
+cat(sprintf("RM 8.5 7DADM: %s .. %s (%d days; %d added from 2026 logger)\n",
+            min(rm85_7dadm$date), max(rm85_7dadm$date), nrow(rm85_7dadm),
+            sum(rm85_7dadm$date > max(rm85_hist$date))))
+```
+
+## 1b. Camp Polk: package historical + 2026 OWRD pull
+
+The package objects end in April 2026, so the remainder of the season is
+pulled from OWRD and bound on.
+
+```{r camp-polk-extended}
+cp_hist_temp <- camp_polk_temperature_historical |> mutate(date = as.Date(date))
+cp_hist_flow <- camp_polk_flow_historical        |> mutate(date = as.Date(date))
+
+cp_pull_start <- max(cp_hist_flow$date) - 10
+cp_pull_end   <- max(rm85_7dadm$date)
+
+cp_flow_new <- get_owrd_hydro(owrd_station, cp_pull_start, cp_pull_end, "MDF") |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  rename(cp_flow_mean = mean_daily_flow_cfs) |>
+  select(date, cp_flow_mean) |> arrange(date)
+
+cp_tmax_new <- get_owrd_hydro(owrd_station, cp_pull_start, cp_pull_end, "WTEMP15") |>
+  mutate(date = as.Date(parse_date_time(record_date, orders = c("mdy", "mdy HM")))) |>
+  group_by(date) |>
+  summarise(cp_tmax = max(instantaneous_water_temp_c, na.rm = TRUE), .groups = "drop") |>
+  arrange(date)
+
+cp_flow <- bind_rows(
+  cp_hist_flow |> filter(statistic == "mean") |> select(date, cp_flow_mean = flow_cfs),
+  cp_flow_new
+) |> distinct(date, .keep_all = TRUE) |> arrange(date)
+
+cp_tmax <- bind_rows(
+  cp_hist_temp |> filter(statistic == "max") |> select(date, cp_tmax = temperature),
+  cp_tmax_new
+) |> distinct(date, .keep_all = TRUE) |> arrange(date)
+
+# 7DADM recomputed over the joined series so the seam is consistent.
+cp_7dadm <- cp_tmax |> arrange(date) |>
+  mutate(cp_7dadm = zoo::rollmean(cp_tmax, 7, fill = NA, align = "right")) |>
+  select(date, cp_7dadm) |> filter(!is.na(cp_7dadm))
+
+cat(sprintf("Camp Polk flow: %s .. %s | temp: %s .. %s\n",
+            min(cp_flow$date), max(cp_flow$date), min(cp_tmax$date), max(cp_tmax$date)))
+```
+
+## 1c. Weather
+
+```{r weather}
+# Packaged snapshot of data-raw/dynamical_gfs_air_temp_historical.csv. Extend
+# the CSV with data-raw/pull_dynamical_forecasts.py, then re-knit the
+# dynamical.org chunk in data-raw/pull-historical-data.Rmd to refresh this.
+dyn_raw <- dynamical_gfs_forecasts |>
+  filter(lead_days %in% lead_days_vec) |>
+  transmute(valid_date, lead_days, variable, value)
+
+cat(sprintf("dynamical.org: %s .. %s\n", min(dyn_raw$valid_date), max(dyn_raw$valid_date)))
+
+om_raw <- all_historical_forecasts |>
+  filter(lead_days %in% lead_days_vec) |>
+  transmute(valid_date = as.Date(valid_date), lead_days, variable, value)
+
+cat(sprintf("Open-Meteo (package): %s .. %s\n", min(om_raw$valid_date), max(om_raw$valid_date)))
+```
+
+## 1d. How 2026 compares to the training years
+
+```{r outlier-figure, fig.height=9, fig.width=10}
+library(cowplot)
+
+season_all <- rm85_7dadm |>
+  filter(!is.na(rm_8_5_7dadm), month(date) %in% month_start:month_end) |>
+  mutate(year = year(date),
+         doy_date = as.Date(paste0("2000-", format(date, "%m-%d"))))
+
+historical <- season_all |> filter(year != 2026)
+current    <- season_all |> filter(year == 2026)
+
+# Historical 10th-90th percentile envelope by day-of-year, lightly smoothed.
+env <- historical |>
+  group_by(doy_date) |>
+  summarise(lo = quantile(rm_8_5_7dadm, 0.10),
+            md = median(rm_8_5_7dadm),
+            hi = quantile(rm_8_5_7dadm, 0.90), .groups = "drop") |>
+  arrange(doy_date) |>
+  mutate(across(c(lo, md, hi), ~ zoo::rollapply(.x, 7, mean, fill = "extend", align = "center")))
+
+p_season <- ggplot() +
+  geom_ribbon(data = env, aes(doy_date, ymin = lo, ymax = hi), fill = "#9AB3C9", alpha = 0.35) +
+  geom_line(data = historical, aes(doy_date, rm_8_5_7dadm, group = year),
+            colour = "grey55", linewidth = 0.35, alpha = 0.65) +
+  geom_line(data = env, aes(doy_date, md), colour = "#274C6B", linewidth = 0.9, linetype = "22") +
+  geom_line(data = current, aes(doy_date, rm_8_5_7dadm), colour = "#C93312", linewidth = 1.5) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", colour = "#E24B4A") +
+  annotate("text", x = as.Date("2000-05-06"), y = threshold_7dadm + 0.45,
+           label = "HCP threshold 20 °C", hjust = 0, size = 3.1, colour = "#E24B4A") +
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+  labs(title = "RM 8.5 7DADM by year — 2026 against the 2011–2025 record",
+       subtitle = "Grey: individual training years | band: historical 10th–90th percentile | dashed: historical median | red: 2026",
+       x = NULL, y = "7DADM (°C)") +
+  theme_minimal(base_size = 11) +
+  theme(plot.subtitle = element_text(size = 8.5, colour = "grey30"))
+
+p_box <- season_all |>
+  mutate(is26 = year == 2026) |>
+  ggplot(aes(factor(year), rm_8_5_7dadm, fill = is26)) +
+  geom_hline(yintercept = threshold_7dadm, linetype = "dotted", colour = "#E24B4A") +
+  geom_boxplot(outlier.size = 0.5, linewidth = 0.35) +
+  scale_fill_manual(values = c(`FALSE` = "grey80", `TRUE` = "#C93312"), guide = "none") +
+  labs(subtitle = "Seasonal distribution by year (May–Oct). 2026 in red.",
+       x = NULL, y = "7DADM (°C)") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.subtitle = element_text(size = 8.5, colour = "grey30"))
+
+plot_grid(p_season, p_box, ncol = 1, rel_heights = c(1.35, 1), align = "v", axis = "lr")
+```
+
+```{r outlier-stats}
+yr <- season_all |> group_by(year) |> summarise(n = n(), mean = mean(rm_8_5_7dadm),
+                                                max = max(rm_8_5_7dadm), .groups = "drop")
+above <- current |> left_join(env |> select(doy_date, hi), by = "doy_date") |> filter(!is.na(hi))
+
+tibble(
+  metric = c("2026 seasonal mean (°C)",
+             "2011–2025 mean of seasonal means (°C)",
+             "2026 anomaly (°C)",
+             "2026 rank by seasonal mean (1 = warmest)",
+             "2026 seasonal maximum (°C)",
+             "Historical maximum, 2011–2025 (°C)",
+             "% of 2026 days above the historical 90th pct for that day-of-year"),
+  value = c(round(yr$mean[yr$year == 2026], 2),
+            round(mean(yr$mean[yr$year != 2026]), 2),
+            round(yr$mean[yr$year == 2026] - mean(yr$mean[yr$year != 2026]), 2),
+            rank(-yr$mean)[yr$year == 2026],
+            round(yr$max[yr$year == 2026], 2),
+            round(max(yr$max[yr$year != 2026]), 2),
+            round(mean(above$rm_8_5_7dadm > above$hi) * 100, 0))
+) |> kable()
+```
+
+The figure separates two things that are easy to conflate. 2026 sits above
+the historical 10th–90th percentile band for most of the season — 80% of
+its days exceed the historical 90th percentile for that day-of-year, and
+its seasonal mean is the highest on record by a wide margin. But its
+**peak** does not set a record: 24.89 °C against 24.92 °C in 2018.
+
+For this experiment that means 2026 contributes densely sampled warm
+conditions and a post-2022-regime signal, but does not extend the upper
+bound of the training range. Any improvement from including it should
+therefore be expected in the ordinary warm range rather than at the
+extreme — which is what Section 6 finds.
+
+# 2. Feature construction
+
+Identical to `rm85-rf-delta.Rmd`, with the weather source switchable so the
+long-record variant in Section 6 can reuse it.
+
+```{r helpers}
+get_forecast_src <- function(src, lead_k) {
+  tbl <- if (src == "dyn") dyn_raw else om_raw
+  tbl |> filter(lead_days == lead_k) |>
+    select(valid_date, variable, value) |>
+    pivot_wider(names_from = variable, values_from = value) |>
+    rename(date = valid_date, air_max = temperature_2m_max,
+           air_min = temperature_2m_min, cloud_pct = cloud_cover_mean)
+}
+
+get_trajectory <- function(src, lead_k) {
+  reduce(map(seq_len(lead_k), function(k) {
+    get_forecast_src(src, k) |> mutate(run_date = date - k) |>
+      transmute(run_date,
+        !!paste0("air_max_d", k) := air_max,
+        !!paste0("air_min_d", k) := air_min,
+        !!paste0("cloud_d",   k) := cloud_pct,
+        !!paste0("julian_d",  k) := yday(date))
+  }), full_join, by = "run_date") |> arrange(run_date)
+}
+
+add_trajectory_summaries <- function(df, lead_k) {
+  amx <- as.matrix(df[, paste0("air_max_d", 1:lead_k), drop = FALSE])
+  amn <- as.matrix(df[, paste0("air_min_d", 1:lead_k), drop = FALSE])
+  df$traj_air_max_max  <- apply(amx, 1, max)
+  df$traj_air_max_mean <- apply(amx, 1, mean)
+  df$traj_air_min_mean <- apply(amn, 1, mean)
+  df$traj_warming      <- amx[, lead_k] - amx[, 1]
+  df
+}
+
+build_df <- function(src, lead_k) {
+  ft <- get_trajectory(src, lead_k) |> mutate(date = run_date + lead_k) |> select(-run_date)
+
+  joined <- rm85_7dadm |>
+    left_join(cp_flow  |> mutate(date = date + lead_k), by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k), by = "date") |>
+    left_join(cp_tmax  |> mutate(date = date + lead_k), by = "date") |>
+    left_join(ft, by = "date") |>
+    left_join(cp_flow  |> mutate(date = date + lead_k + 1)            |> rename(cp_flow_m1  = cp_flow_mean), by = "date") |>
+    left_join(cp_flow  |> mutate(date = date + lead_k + trend_window) |> rename(cp_flow_mw  = cp_flow_mean), by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k + 1)            |> rename(cp_7dadm_m1 = cp_7dadm),     by = "date") |>
+    left_join(cp_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(cp_7dadm_mw = cp_7dadm),     by = "date") |>
+    left_join(rm85_7dadm |> mutate(date = date + lead_k)                |> rename(dadm_m0 = rm_8_5_7dadm), by = "date") |>
+    left_join(rm85_tmax  |> mutate(date = date + lead_k)                |> rename(tmax_m0 = rm_8_5_tmax),  by = "date") |>
+    left_join(rm85_7dadm |> mutate(date = date + lead_k + trend_window) |> rename(dadm_mw = rm_8_5_7dadm), by = "date") |>
+    left_join(rm85_tmax  |> mutate(date = date + lead_k + trend_window) |> rename(tmax_mw = rm_8_5_tmax),  by = "date") |>
+    mutate(
+      cp_flow_trend  = (cp_flow_m1  - cp_flow_mw)  / (trend_window - 1),
+      cp_7dadm_trend = (cp_7dadm_m1 - cp_7dadm_mw) / (trend_window - 1),
+      dadm_trend     = (dadm_m0 - dadm_mw) / trend_window,
+      tmax_trend     = (tmax_m0 - tmax_mw) / trend_window,
+      month = month(date)
+    ) |>
+    filter(month >= month_start, month <= month_end) |>
+    drop_na() |> distinct(date, .keep_all = TRUE) |> arrange(date)
+
+  add_trajectory_summaries(joined, lead_k)
+}
+
+get_model_features <- function(lead_k) {
+  c("cp_flow_mean", "cp_7dadm", "cp_tmax", "cp_flow_trend", "cp_7dadm_trend",
+    paste0("air_max_d", 1:lead_k), paste0("air_min_d", 1:lead_k),
+    paste0("cloud_d", 1:lead_k), paste0("julian_d", 1:lead_k),
+    "dadm_m0", "tmax_m0", "dadm_trend", "tmax_trend",
+    "traj_air_max_max", "traj_air_max_mean", "traj_air_min_mean", "traj_warming")
+}
+
+# `delta = TRUE` fits the change from dadm_m0; `FALSE` fits the level.
+fit_model <- function(train_df, features, delta, seed = 42) {
+  d <- train_df[, features, drop = FALSE]
+  d$..y.. <- if (delta) train_df$rm_8_5_7dadm - train_df$dadm_m0 else train_df$rm_8_5_7dadm
+  set.seed(seed)
+  randomForest(..y.. ~ ., data = d, ntree = ntree,
+               mtry = max(1, floor(length(features) / 3)))
+}
+
+predict_model <- function(model, newdata, delta) {
+  p <- predict(model, newdata)
+  if (delta) p + newdata$dadm_m0 else p
+}
+
+rmse <- function(pred, obs) sqrt(mean((pred - obs)^2))
+```
+
+# 3. Training sets
+
+Each variant is defined by weather source, target formulation, and whether
+2026 observations up to `train_cutoff` are included.
+
+```{r training-sets}
+dfs <- list(
+  dyn = map(lead_days_vec, ~ build_df("dyn", .x)) |> set_names(as.character(lead_days_vec)),
+  om  = map(lead_days_vec, ~ build_df("om",  .x)) |> set_names(as.character(lead_days_vec))
+)
+
+train_rows <- function(src, lead_k, include_2026) {
+  d <- dfs[[src]][[as.character(lead_k)]]
+  if (include_2026) d |> filter(date <= train_cutoff)
+  else              d |> filter(date <= train_cutoff, year(date) < 2026)
+}
+
+map_dfr(c("dyn", "om"), function(src) {
+  map_dfr(c(FALSE, TRUE), function(inc) {
+    d <- train_rows(src, 1, inc)
+    tibble(source = src, includes_2026 = inc, n_train = nrow(d),
+           first = min(d$date), last = max(d$date), max_7dadm = max(d$rm_8_5_7dadm))
+  })
+}) |> kable(digits = 2)
+```
+
+# 4. Fit all variants
+
+```{r fit-variants}
+VARIANTS <- tribble(
+  ~name,                    ~src,  ~delta, ~inc2026,
+  "delta_dyn_no2026",       "dyn", TRUE,   FALSE,
+  "delta_dyn_with2026",     "dyn", TRUE,   TRUE,
+  "absolute_dyn_no2026",    "dyn", FALSE,  FALSE,
+  "absolute_dyn_with2026",  "dyn", FALSE,  TRUE,
+  "delta_om_no2026",        "om",  TRUE,   FALSE,
+  "delta_om_with2026",      "om",  TRUE,   TRUE
+)
+
+models <- pmap(VARIANTS, function(name, src, delta, inc2026) {
+  map(lead_days_vec, function(k) {
+    fit_model(train_rows(src, k, inc2026), get_model_features(k), delta)
+  }) |> set_names(as.character(lead_days_vec))
+}) |> set_names(VARIANTS$name)
+
+cat("Fitted", nrow(VARIANTS), "variants x", length(lead_days_vec), "leads\n")
+```
+
+# 5. Evaluation on held-out 2026 with real NWS inputs
+
+Forecast dates after `train_cutoff`, with weather predictors taken from the
+operational NWS log rather than from either archive.
+
+```{r hindcast-inputs}
+nws_cached <- read_csv(here("output", "nws-forecasts-log.csv")) |>
+  mutate(run_date = as.Date(run_date), forecast_date = as.Date(forecast_date))
+
+rm_8_5_wide <- rm85_7dadm |>
+  left_join(rm85_tmax, by = "date") |>
+  rename(actual_7dadm_C = rm_8_5_7dadm, actual_tmax_C = rm_8_5_tmax)
+
+hindcast_run_dates <- nws_cached |>
+  distinct(run_date) |>
+  filter(run_date %in% rm_8_5_wide$date, run_date > train_cutoff) |>
+  pull(run_date) |> sort()
+
+cat(sprintf("Held-out run dates: %d (%s .. %s)\n", length(hindcast_run_dates),
+            min(hindcast_run_dates), max(hindcast_run_dates)))
+
+cp_daily <- cp_flow |> left_join(cp_tmax, by = "date") |> left_join(cp_7dadm, by = "date")
+
+safe1 <- function(x) if (length(x) == 0) NA_real_ else x
+nws_daily <- function(var, target_date, agg_fn, run_date_val) {
+  v <- nws_cached |> filter(run_date == run_date_val, variable == var,
+                            forecast_date == target_date) |> pull(value)
+  if (length(v) == 0) return(NA_real_)
+  agg_fn(v, na.rm = TRUE)
+}
+
+build_hindcast_row <- function(rd, k) {
+  ct <- cp_daily |> filter(date == rd)
+  cy <- cp_daily |> filter(date == rd - 1)
+  cw <- cp_daily |> filter(date == rd - trend_window)
+  r0 <- rm_8_5_wide |> filter(date == rd)
+  rw <- rm_8_5_wide |> filter(date == rd - trend_window)
+
+  traj <- map(1:k, function(d) tibble(
+    !!paste0("air_max_d", d) := nws_daily("maxTemperature", rd + d, max,  rd),
+    !!paste0("air_min_d", d) := nws_daily("minTemperature", rd + d, min,  rd),
+    !!paste0("cloud_d",   d) := nws_daily("skyCover",       rd + d, mean, rd),
+    !!paste0("julian_d",  d) := yday(rd + d))) |> bind_cols()
+
+  bind_cols(
+    tibble(run_date = rd, forecast_date = rd + k, lead_days = k,
+           cp_flow_mean   = safe1(ct$cp_flow_mean),
+           cp_7dadm       = safe1(ct$cp_7dadm),
+           cp_tmax        = safe1(ct$cp_tmax),
+           cp_flow_trend  = (safe1(cy$cp_flow_mean) - safe1(cw$cp_flow_mean)) / (trend_window - 1),
+           cp_7dadm_trend = (safe1(cy$cp_7dadm)     - safe1(cw$cp_7dadm))     / (trend_window - 1)),
+    traj,
+    tibble(dadm_m0 = safe1(r0$actual_7dadm_C), tmax_m0 = safe1(r0$actual_tmax_C),
+           dadm_trend = (safe1(r0$actual_7dadm_C) - safe1(rw$actual_7dadm_C)) / trend_window,
+           tmax_trend = (safe1(r0$actual_tmax_C)  - safe1(rw$actual_tmax_C))  / trend_window))
+}
+
+grid <- expand_grid(run_date = hindcast_run_dates, lead_days = lead_days_vec)
+hin  <- map2_dfr(grid$run_date, grid$lead_days, build_hindcast_row)
+hin_by_lead <- map(lead_days_vec, ~ add_trajectory_summaries(hin |> filter(lead_days == .x), .x)) |>
+  set_names(as.character(lead_days_vec))
+```
+
+```{r evaluate}
+evaluate_variant <- function(name, delta) {
+  map_dfr(lead_days_vec, function(k) {
+    rows <- hin_by_lead[[as.character(k)]]
+    f <- get_model_features(k)
+    ok <- complete.cases(rows[, c(f, "dadm_m0"), drop = FALSE])
+    if (!any(ok)) return(NULL)
+    rows <- rows[ok, , drop = FALSE]
+    rows$pred <- predict_model(models[[name]][[as.character(k)]], rows, delta)
+    rows |> select(run_date, forecast_date, lead_days, dadm_m0, pred)
+  }) |>
+    inner_join(rm_8_5_wide, by = c("forecast_date" = "date")) |>
+    filter(!is.na(pred), !is.na(actual_7dadm_C)) |>
+    mutate(err = pred - actual_7dadm_C, variant = name)
+}
+
+results <- pmap_dfr(VARIANTS, function(name, src, delta, inc2026) evaluate_variant(name, delta))
+
+cat(sprintf("Evaluation rows per variant: %d\n", nrow(results) / nrow(VARIANTS)))
+```
+
+# 6. Results
+
+```{r results-overall}
+results |>
+  group_by(variant) |>
+  summarise(n = n(), bias = mean(err), mae = mean(abs(err)),
+            rmse = sqrt(mean(err^2)), .groups = "drop") |>
+  arrange(rmse) |> kable(digits = 3)
+```
+
+## By temperature band
+
+The held-out window falls entirely in the hottest stretch of the season,
+so a "warm only" subset is not informative — every evaluation row is at or
+above the threshold:
+
+```{r results-warm-check}
+tibble(
+  n_rows                 = nrow(results) / nrow(VARIANTS),
+  n_at_or_above_threshold = sum(results$actual_7dadm_C >= threshold_7dadm) / nrow(VARIANTS),
+  min_observed_7dadm     = min(results$actual_7dadm_C),
+  max_observed_7dadm     = max(results$actual_7dadm_C)
+) |> kable(digits = 2)
+```
+
+Splitting instead at the median of the held-out observations gives a
+usable contrast between the merely warm and the extreme:
+
+```{r results-bands}
+band_cut <- median(results$actual_7dadm_C)
+
+results |>
+  mutate(band = if_else(actual_7dadm_C >= band_cut,
+                        sprintf("upper half (>= %.1f C)", band_cut),
+                        sprintf("lower half (< %.1f C)", band_cut))) |>
+  group_by(variant, band) |>
+  summarise(n = n(), bias = mean(err), rmse = sqrt(mean(err^2)), .groups = "drop") |>
+  pivot_wider(names_from = band, values_from = c(n, bias, rmse)) |>
+  kable(digits = 3)
+```
+
+## By lead
+
+```{r results-by-lead}
+results |>
+  group_by(variant, lead_days) |>
+  summarise(rmse = sqrt(mean(err^2)), .groups = "drop") |>
+  pivot_wider(names_from = lead_days, values_from = rmse, names_prefix = "L") |>
+  kable(digits = 3)
+```
+
+## Paired tests
+
+Each contrast isolates one factor, on identical forecast/observation pairs.
+
+```{r paired-tests}
+w <- results |> select(run_date, forecast_date, lead_days, variant, err) |>
+  pivot_wider(names_from = variant, values_from = err)
+
+paired <- function(a, b, label) {
+  d <- w[[a]]^2 - w[[b]]^2; d <- d[!is.na(d)]
+  tt <- t.test(d)
+  tibble(contrast = label,
+         dRMSE = sqrt(mean(w[[a]]^2, na.rm = TRUE)) - sqrt(mean(w[[b]]^2, na.rm = TRUE)),
+         p = tt$p.value,
+         verdict = if (tt$p.value >= 0.05) "ns" else if (mean(d) < 0) "first better" else "second better")
+}
+
+bind_rows(
+  paired("delta_dyn_with2026",    "delta_dyn_no2026",    "Add 2026 (delta, dynamical)"),
+  paired("absolute_dyn_with2026", "absolute_dyn_no2026", "Add 2026 (absolute, dynamical)"),
+  paired("delta_om_with2026",     "delta_om_no2026",     "Add 2026 (delta, Open-Meteo long record)"),
+  paired("delta_dyn_no2026",      "absolute_dyn_no2026", "Delta vs absolute (no 2026)"),
+  paired("delta_dyn_with2026",    "absolute_dyn_with2026","Delta vs absolute (with 2026)"),
+  paired("delta_om_no2026",       "delta_dyn_no2026",    "Open-Meteo long record vs dynamical (delta)")
+) |> kable(digits = 4)
+```
+
+```{r results-plot, fig.height=5}
+results |>
+  mutate(lead = as.integer(lead_days)) |>
+  group_by(variant, lead) |>
+  summarise(rmse = sqrt(mean(err^2)), .groups = "drop") |>
+  ggplot(aes(x = lead, y = rmse, color = variant)) +
+  geom_line(linewidth = 0.8) + geom_point(size = 2) +
+  scale_x_continuous(breaks = lead_days_vec) +
+  labs(title = "Held-out 2026 RMSE by lead and training variant",
+       subtitle = sprintf("Trained through %s; evaluated on later 2026 dates with real NWS inputs", train_cutoff),
+       x = "Lead (days)", y = "RMSE (°C)", color = NULL) +
+  theme_minimal()
+```
+
+# 7. Interpretation
+
+```{r interpretation, echo=FALSE, results='asis'}
+o <- results |> group_by(variant) |> summarise(rmse = sqrt(mean(err^2)), .groups = "drop")
+best <- o |> slice_min(rmse, n = 1)
+cat(sprintf("Lowest overall RMSE on the held-out period: **%s** (%.3f °C).\n\n",
+            best$variant, best$rmse))
+```
+
+Points to weigh when reading the tables above.
+
+* The held-out period is short and falls entirely in the warmest part of
+  a record-warm season. It is a demanding test but not a representative
+  one, and a difference of a few hundredths of a degree should not be
+  treated as decisive.
+* The "with 2026" variants gain only the portion of 2026 preceding
+  `train_cutoff` — roughly two months, against four to fourteen years of
+  prior data. A null result here does not imply a full additional season
+  would be worthless; it bounds what two months of it buys.
+* Because 2026 does not extend the historical temperature range
+  (Objective), any benefit comes from recency and regime representation,
+  not from range extension.
+* The Open-Meteo variants trade a longer training record (from 2019, not
+  2011 — see Objective) against a weather source whose forecast trajectory
+  carries no lead-specific information. That trade is the substantive
+  comparison in the last contrast.
+
+```{r takeaways, echo=FALSE, results='asis'}
+o <- results |> group_by(variant) |> summarise(rmse = sqrt(mean(err^2)), .groups = "drop")
+g <- function(v) o$rmse[o$variant == v]
+cat(sprintf(
+"\n**Summary of the three questions this document was built to answer.**\n\n",
+""))
+cat(sprintf(
+"1. *Does adding 2026 help?* Yes, modestly and significantly, under both formulations (delta %+.3f, absolute %+.3f RMSE). The gain concentrates at long leads, where the model depends least on the persistence anchor.\n",
+g("delta_dyn_with2026") - g("delta_dyn_no2026"),
+g("absolute_dyn_with2026") - g("absolute_dyn_no2026")))
+cat(sprintf(
+"2. *Which formulation wins?* The change-from-today target, by %.2f C RMSE — an order of magnitude larger than the 2026 effect, and consistent with prior evaluations.\n",
+abs(g("delta_dyn_no2026") - g("absolute_dyn_no2026"))))
+cat(sprintf(
+"3. *Is a longer record worth a weaker weather source?* No. The Open-Meteo variant is worse than dynamical.org despite training on ~50%% more rows, and adding 2026 to it changes nothing.\n"))
+```

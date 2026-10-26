@@ -1,0 +1,41 @@
+url: https://flowwest.github.io/udwc_temperature/
+
+template:
+  bootstrap: 5
+
+navbar:
+  structure:
+    left:  [reference, articles]
+    right: [search, github]
+
+articles:
+- title: Model development
+  navbar: Model development
+  contents:
+  - model-development-history
+
+- title: Data sources
+  navbar: Data sources
+  contents:
+  - model-inputs
+  - air-temperature-source
+
+# Both sections use selectors rather than named topics, so a newly documented
+# dataset or function lands in the right place without editing this file.
+# roxygen tags every `"name"` data doc with the `datasets` keyword, which is
+# what splits the two.
+reference:
+- title: Datasets
+  desc: >
+    Observed and forecast records shipped with the package. See the
+    "Model Input Datasets" article for sources, coverage and exploratory plots.
+  contents:
+  - has_keyword("datasets")
+
+- title: Functions
+  desc: >
+    Data retrieval helpers, the RM 6 linear model, and utilities.
+  contents:
+  # A leading negative selector starts from every topic and subtracts, so this
+  # is "everything that is not a dataset" without naming anything.
+  - -has_keyword("datasets")
