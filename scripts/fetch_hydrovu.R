@@ -1,7 +1,8 @@
 # scripts/fetch_hydrovu.R
 # Appends new HydroVu readings to hv_data.csv in the whychusData repo (see
-# HV_DATA_FILE in hydrovu_config.R). Existing rows stay in place and new
-# readings go at the bottom, so each refresh commits as a block of added lines.
+# HV_DATA_FILE in hydrovu_config.R). The file is kept in time order, so each
+# refresh mostly commits as a block of lines added at the bottom; late readings
+# are inserted at their place in time.
 #
 # Run daily by .github/workflows/hydrovu_refresh.yml. To run locally:
 #   cd ../whychusData && git pull
@@ -72,9 +73,9 @@ message("Loaded ", nrow(new_data), " new records.")
 
 ## APPEND + SAVE ===============================================================
 
-# Existing rows keep their position (revised values update in place); new
-# readings are appended in time order
-combined <- hv_append(existing_data, new_data, order = "append")
+# Sorted by timestamp, then location_id, parameter_id (revised values update
+# in place)
+combined <- hv_append(existing_data, new_data, order = "time")
 
 dir.create(dirname(DATA_FILE), showWarnings = FALSE)
 hv_write_csv(combined, DATA_FILE)
