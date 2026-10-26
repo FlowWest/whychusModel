@@ -4,36 +4,62 @@ on:
     - cron: '0 3 * * *'   # 8 PM Pacific during PDT (summer)
     - cron: '0 4 * * *'   # 8 PM Pacific during PST (winter)
   workflow_dispatch:
+
+# This repo is only read; everything the run produces is pushed to the
+# whychusData repo, using WHYCHUS_DATA_TOKEN (a token with write access to it).
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # whychusData's input/ folder — read by the fetch_*.R and run-daily-forecast.R
+  # scripts (output/ is its sibling). See scripts/common.R.
+  WHYCHUS_DATA_DIR: ${{ github.workspace }}/whychusData/input
+
 jobs:
   forecast:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout whychusModel
         uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Check if today's forecast already ran
-        id: check_dedupe
-        run: |
-          today=$(TZ='America/Los_Angeles' date +%F)
-          log_file="output/instream-forecast-log.csv"
-          if [ -f "$log_file" ] && grep -q "^$today," "$log_file"; then
-            echo "Forecast for $today already logged — skipping duplicate run."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No forecast for $today yet — proceeding with today's date: $today"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+
+      # Latest inputs and the output log; this run appends to both.
       - name: Checkout whychusData
-        if: steps.check_dedupe.outputs.skip == 'false'
         uses: actions/checkout@v6
         with:
           repository: FlowWest/whychusData
           ref: main
           path: whychusData
           token: ${{ secrets.WHYCHUS_DATA_TOKEN }}
+
+      # Two crons fire an hour apart so one lands at 8 pm Pacific on either side
+      # of daylight saving. A day counts as done only if at least one lead
+      # produced a forecast: a run that skipped every lead (e.g. the logger feed
+      # was late at 7 pm in winter) must not block the retry an hour later.
+      # Rows for the same date are replaced, not duplicated, when it re-runs.
+      - name: Check if today's forecast already ran
+        id: check_dedupe
+        run: |
+          today=$(TZ='America/Los_Angeles' date +%F)
+          log_file="whychusData/output/model_outputs.csv"
+          done=false
+          if [ -f "$log_file" ]; then
+            # pred_7dadm_C is located by name. It comes before the free-text
+            # `note` column (the only one that can contain commas), so plain
+            # comma-splitting is safe for the fields read here.
+            if awk -F, -v d="$today" '
+                 NR == 1 { for (i = 1; i <= NF; i++) if ($i == "pred_7dadm_C") c = i; next }
+                 c && $1 == d && $c != "" && $c != "NA" { found = 1 }
+                 END { exit !found }' "$log_file"; then
+              done=true
+            fi
+          fi
+          if [ "$done" = true ]; then
+            echo "Forecast for $today already logged — skipping duplicate run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No completed forecast for $today yet — proceeding with today's date: $today"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up R
         if: steps.check_dedupe.outputs.skip == 'false'
         uses: r-lib/actions/setup-r@v2
@@ -87,37 +113,38 @@ jobs:
             "https://apps.wrd.state.or.us/apps/sw/hydro_near_real_time/" \
             -o /dev/null -w "\nHTTP status: %{http_code}\n" || true
 
-      # HydroVu failures are reported on the step but don't block the forecast
+      # Data updates. A failed source is reported on its step but doesn't block
+      # the forecast: run-daily-forecast.R skips any lead whose inputs are
+      # missing and records why in model_outputs.csv.
       - name: Fetch HydroVu data
-        id: hydrovu
         if: steps.check_dedupe.outputs.skip == 'false'
         continue-on-error: true
         env:
           HYDROVU_CLIENT_ID: ${{ secrets.HYDROVU_CLIENT_ID }}
           HYDROVU_CLIENT_SECRET: ${{ secrets.HYDROVU_CLIENT_SECRET }}
-          WHYCHUS_DATA_DIR: ${{ github.workspace }}/whychusData/input
         run: Rscript scripts/fetch_hydrovu.R
-      - name: Commit and push HydroVu data
-        if: steps.check_dedupe.outputs.skip == 'false' && steps.hydrovu.outcome == 'success'
+      - name: Fetch NWS forecast
+        if: steps.check_dedupe.outputs.skip == 'false'
         continue-on-error: true
+        run: Rscript scripts/fetch_nws.R
+      - name: Fetch Camp Polk data
+        if: steps.check_dedupe.outputs.skip == 'false'
+        continue-on-error: true
+        run: Rscript scripts/fetch_camp_polk.R
+
+      - name: Run daily forecast
+        if: steps.check_dedupe.outputs.skip == 'false'
+        run: Rscript scripts/run-daily-forecast.R
+
+      # Push the refreshed inputs and the new forecast together, even if the
+      # forecast step failed, so the data that was fetched is not lost.
+      - name: Commit and push to whychusData
+        if: steps.check_dedupe.outputs.skip == 'false' && always()
         working-directory: whychusData
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add input/hv_data.csv
-          git diff --staged --quiet || git commit -m "chore: hydrovu data $(date -u +%Y-%m-%d)"
+          git add input output
+          git diff --staged --quiet || git commit -m "chore: daily data and forecast $(TZ='America/Los_Angeles' date +%F)"
           git pull --rebase
-          git push
-
-      - name: Run daily forecast
-        if: steps.check_dedupe.outputs.skip == 'false'
-        run: Rscript analysis/run-daily-forecast.R
-      - name: Commit and push forecast log
-        if: steps.check_dedupe.outputs.skip == 'false' && always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull
-          git add output/
-          git diff --staged --quiet || git commit -m "chore: forecast log $(date -u +%Y-%m-%d)"
           git push

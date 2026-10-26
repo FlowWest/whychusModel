@@ -20,7 +20,7 @@ hydrovu_parameters
 }
 \description{
 All HydroVu parameter friendly-names, for resolving \code{parameter_id} in
-the HydroVu readings stored at \code{input/hv_data.csv} in the
+the HydroVu readings stored at \code{input/hydro_vu.csv} in the
 whychusData repo.
 }
 \keyword{datasets}

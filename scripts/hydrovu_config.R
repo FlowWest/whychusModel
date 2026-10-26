@@ -12,7 +12,7 @@ HV_LOCATIONS <- c("Whychus Creek RM 8.5")
 # hydrovu_parameters and hydrovu_units package datasets.
 HV_DATA_DIR <- Sys.getenv("WHYCHUS_DATA_DIR",
                           file.path(dirname(here::here()), "whychusData", "input"))
-HV_DATA_FILE <- file.path(HV_DATA_DIR, "hv_data.csv")
+HV_DATA_FILE <- file.path(HV_DATA_DIR, "hydro_vu.csv")
 
 if (!dir.exists(dirname(HV_DATA_DIR))) {
   stop("whychusData repo not found at ", normalizePath(dirname(HV_DATA_DIR), mustWork = FALSE),

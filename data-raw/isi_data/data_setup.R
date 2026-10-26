@@ -1,5 +1,5 @@
 # data-raw/isi_data/data_setup.R
-# One-time setup: seed hv_data.csv (HV_DATA_FILE, in the whychusData repo)
+# One-time setup: seed hydro_vu.csv (HV_DATA_FILE, in the whychusData repo)
 # from an isi-data.com CSV export for Whychus Creek RM 8.5, then backfill from
 # HydroVu so the scheduled refresh (scripts/fetch_hydrovu.R) picks up where
 # this leaves off. Commit the resulting CSV to whychusData.

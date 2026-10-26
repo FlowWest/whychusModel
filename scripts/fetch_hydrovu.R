@@ -1,5 +1,5 @@
 # scripts/fetch_hydrovu.R
-# Appends new HydroVu readings to hv_data.csv in the whychusData repo (see
+# Appends new HydroVu readings to hydro_vu.csv in the whychusData repo (see
 # HV_DATA_FILE in hydrovu_config.R). The file is kept in time order, so each
 # refresh mostly commits as a block of lines added at the bottom; late readings
 # are inserted at their place in time.
