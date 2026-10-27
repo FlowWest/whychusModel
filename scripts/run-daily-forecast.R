@@ -18,12 +18,10 @@
 # columns are blank where a lead does not reach that day (lead 3 has no d4-d7).
 # If the model's feature set changes, update the column layout below.
 #
-# model_outputs.csv still begins with the rows of the old
-# instream-forecast-log.csv (the earlier absolute-value models, marked
-# note = "dummy data"). New rows add columns to the right of the old ones
-# (dadm_m0, pred_change_C, source columns); columns only one generation has are
-# blank in the other's rows, e.g. pred_tmax_C, which the delta models do not
-# produce.
+# model_outputs.csv: one row per lead per run. The delta models predict the
+# CHANGE in 7DADM from today (pred_change_C); the forecast is dadm_m0 + that
+# change (pred_7dadm_C). `note` is only filled when a lead was skipped, and says
+# which inputs were missing.
 .libPaths(c(Sys.getenv("R_LIBS_USER"), .libPaths()))
 library(tidyverse)
 library(lubridate)
@@ -293,6 +291,19 @@ predict_lead <- function(k) {
 }
 
 results <- map_dfr(lead_days_vec, predict_lead)
+
+# Fixed column layout, as for model_inputs.csv. pred_7dadm_C must stay ahead of
+# `note`, the only free-text column (it can contain commas): the workflow's
+# "Decide whether to run" step finds pred_7dadm_C by name and splits on commas.
+model_outputs_cols <- c(
+  "run_date", "forecast_date", "lead_days",
+  "dadm_m0", "pred_change_C", "pred_7dadm_C",
+  "note",
+  "cp_flow_source", "cp_temp_source", "air_source"
+)
+stopifnot("results has columns missing from model_outputs_cols" =
+            all(names(results) %in% model_outputs_cols))
+results <- select(results, any_of(model_outputs_cols))
 
 print(results, n = Inf)
 

@@ -34,13 +34,27 @@ abort_missing <- function(msg) {
   quit(status = 1)
 }
 
+#' A CSV column with no values at all (e.g. `note` when no lead was skipped) is
+#' read back by readr as logical, and a logical column cannot be combined with
+#' text. Give such a column in `x` the type of the same-named column in `other`.
+#' Without this, the first run after a file holds only blank notes crashes.
+align_blank_columns <- function(x, other) {
+  for (nm in intersect(names(x), names(other))) {
+    if (is.logical(x[[nm]]) && all(is.na(x[[nm]])) && !is.logical(other[[nm]])) {
+      x[[nm]] <- other[[nm]][rep(NA_integer_, nrow(x))]
+    }
+  }
+  x
+}
+
 #' Append `new_rows` to a CSV log, replacing any existing rows for `run_date`.
 update_log <- function(new_rows, log_file, run_date_val = today) {
   if (file.exists(log_file)) {
     existing <- readr::read_csv(log_file, show_col_types = FALSE) |>
       dplyr::mutate(dplyr::across(dplyr::any_of(c("run_date", "forecast_date")), as.Date)) |>
       dplyr::filter(run_date != run_date_val)
-    updated <- dplyr::bind_rows(existing, new_rows)
+    updated <- dplyr::bind_rows(align_blank_columns(existing, new_rows),
+                                align_blank_columns(new_rows, existing))
   } else {
     updated <- new_rows
   }
@@ -56,7 +70,8 @@ upsert_by_date <- function(new_rows, file) {
     existing <- readr::read_csv(file, show_col_types = FALSE) |>
       dplyr::mutate(date = as.Date(date)) |>
       dplyr::filter(!date %in% new_rows$date)
-    updated <- dplyr::bind_rows(existing, new_rows)
+    updated <- dplyr::bind_rows(align_blank_columns(existing, new_rows),
+                                align_blank_columns(new_rows, existing))
   } else {
     updated <- new_rows
   }
